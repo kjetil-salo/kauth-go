@@ -48,11 +48,15 @@ func buildBgCSS(theme string, bgImage *string, bgCss *string) (bodyCss, beforeCs
 			beforeCss = template.CSS(fmt.Sprintf("url('/static%s') center/cover no-repeat", *bgImage))
 		}
 	} else {
-		img := "/fjord-dawn.jpg"
 		if bgImage != nil && *bgImage != "" {
-			img = *bgImage
+			bodyCss = template.CSS(fmt.Sprintf("url('/static%s') center/cover no-repeat fixed", *bgImage))
+		} else if bgCss != nil && *bgCss != "" {
+			// Bakoverkompatibel utvidelse: lyst tema uten bg_image kan nå bruke
+			// en flat farge (bg_css) i stedet for default-bildet under.
+			bodyCss = template.CSS(*bgCss)
+		} else {
+			bodyCss = template.CSS(fmt.Sprintf("url('/static%s') center/cover no-repeat fixed", "/fjord-dawn.jpg"))
 		}
-		bodyCss = template.CSS(fmt.Sprintf("url('/static%s') center/cover no-repeat fixed", img))
 	}
 	return
 }
