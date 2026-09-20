@@ -140,6 +140,30 @@ UPDATE services SET bg_image = '/polaris-hero.jpg' WHERE id = 'polaris';
 
 Login-templaten setter automatisk `background: url('/static/polaris-hero.jpg') center/cover no-repeat fixed`. Innholdet i `static/` serves på `/static/`-prefiks. Bilder bør være under 1 MB — webp eller komprimert jpeg gir best vekt-til-kvalitet.
 
+### Cloudflare Tunnel: auth_host må være ett nivå under wildcard-domenet
+
+`auth_host` må peke på et hostnavn Cloudflares wildcard-sertifikat faktisk dekker. Et Universal SSL-sertifikat for `eksempel.work` dekker `*.eksempel.work` — **ett** nivå, ikke to. `auth.polaris.eksempel.work` feiler derfor med `SSL routines::ssl/tls alert handshake failure`, mens `auth-polaris.eksempel.work` fungerer. Samme grunn til at dette repoet har `auth-dev.spekto.live` og ikke `auth.dev.spekto.live` for `spekto-dev`.
+
+Sjekkliste for en ny `auth_host` bak samme tunnel som resten av flåten:
+
+1. `cloudflared tunnel route dns --overwrite-dns <tunnel-id> <auth_host>`
+2. Legg til en ingress-rad i `/etc/cloudflared/config.yml` som peker `<auth_host>` mot `http://localhost:<KAUTH_HTTP_PORT>` — samme port som de andre auth-hostene.
+3. `cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate` før restart.
+4. `systemctl restart kauth` (henter ny service-rad inn i registry-cachen) og `systemctl restart cloudflared` (deler tunnel med alle andre tjenester — kort avbrudd for alle, ikke bare den nye).
+
+### Beskytte en side uten egen backend
+
+En ren statisk side (ingen server-side kode) kan ikke selv gjennomføre en OIDC-flyt — den har ingen plass å ta imot `?token=...` på og ingen måte å sette en cookie fra. Løsningen er en tynn auth-gate foran `http.FileServer`, ikke å bygge OIDC inn i kauth for statiske filer:
+
+- Requester uten gyldig cookie → 302 til `https://<auth_host>/login?redirect_uri=<callback_url>`.
+- `callback_url` er et endepunkt på selve gate-prosessen (f.eks. `/auth/callback`), som leser `?token=...`, verifiserer det mot kauths JWKS, og setter cookien selv før den slipper videre til filserveren.
+- **kauth signerer i praksis uten `kid` i selve JWT-headeren** — kun JWKS-oppslaget publiserer en fast `kid` (`kauth-1`). En gate som insisterer på eksakt `kid`-match mot tokenets header vil derfor avvise ellers gyldige tokens. Prøv i stedet alle nøklene JWKS returnerer når `kid` mangler eller ikke finnes i cachen.
+- Refresh-token (`rt`) sendes tilbake fra `/dispatch` som URL-**fragment** (`#rt=...`), ikke query-param — det når aldri en server. En gate uten JS-lag kan ikke fange det opp, og bør derfor la være å prøve. Sett heller `access_token_ttl` på tjenesten til noe lengre enn kauths default (f.eks. `PT12H`) og la brukeren logge inn på nytt sjeldnere, i stedet for å bygge refresh-rotasjon i gaten.
+
+Referanseimplementasjon: `authgate/` i univers-repoet (samme maskin) — ren Go, ingen eksterne avhengigheter, ~300 linjer.
+
+Siden access-tokens er statsløse, kan verken kauth eller en slik gate stoppe et allerede utstedt, ikke-utløpt token — deaktivering av en bruker i kauth virker først ved neste innlogging/refresh. Skal én bestemt bruker kunne tvinges ut umiddelbart uten å røre andre tjenester bak samme kauth-instans, må det løses lokalt i gaten (se "Tving ut en bruker" i `authgate/README.md`) — en liten fil med e-post → tidsstempel, sjekket mot tokenets `iat` på hver request.
+
 ## Sette opp Google OIDC
 
 Per tjeneste, eller globalt for alle. Per tjeneste anbefales hvis tjenestene tilhører ulike domener — Google krever at redirect-URI-en er hvitlistet på OAuth-klienten.
@@ -160,6 +184,14 @@ Samme oppskrift, men i [Microsoft Entra Admin Center](https://entra.microsoft.co
 5. Sett `auth_microsoft = 1`.
 
 Microsoft-flyten bruker `/common`-endepunktet og verifiserer ID-tokenet med `SkipIssuerCheck`, siden personlige kontoer og bedriftskontoer har ulike `iss`-claims. Signaturverifikasjon er fortsatt streng.
+
+### Finne app-registreringen igjen i Entra
+
+Skal en ny tjeneste dele Microsoft-klient med en eksisterende (samme `microsoft_client_id` globalt), må du finne *App registration*-objektet i riktig tenant — ikke *Enterprise application*-objektet, som ser nesten likt ut men mangler redirect-URI-er. Tre fellefaktorer i praksis:
+
+- **Feil tenant**: kontoen din kan ha tilgang til flere Entra-directories. "Default Directory" med 0 apper er nesten aldri riktig sted. Bruk katalogbytteren øverst til høyre, eller prøv den klassiske Azure-portalen (`portal.azure.com`) om entra.microsoft.com ikke lister nok kataloger.
+- **Enterprise Application ≠ App registration**: søker du opp appen fra Enterprise Applications-lista, havner du på en side uten Authentication-blad i det hele tatt. Gå til **Identity → Applications → App registrations** i stedet, og søk på Application (client) ID.
+- **Authentication-siden viser bare én plattform om gangen**: Overview-siden for app-registreringen har en lenke som teller opp redirect-URI-er (f.eks. "1 web") — klikk direkte på det tallet for å hoppe til riktig plattformseksjon, i stedet for å lete gjennom Authentication-fanen manuelt.
 
 ## Sette opp magic-link (e-postinnlogging)
 

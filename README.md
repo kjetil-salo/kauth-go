@@ -140,6 +140,30 @@ UPDATE services SET bg_image = '/polaris-hero.jpg' WHERE id = 'polaris';
 
 The login template automatically applies `background: url('/static/polaris-hero.jpg') center/cover no-repeat fixed`. Everything in `static/` is served under the `/static/` prefix. Keep images under 1 MB — webp or compressed jpeg gives the best weight-to-quality ratio.
 
+### Cloudflare Tunnel: auth_host must sit one level under the wildcard domain
+
+`auth_host` has to be a hostname Cloudflare's wildcard certificate actually covers. A Universal SSL certificate for `example.work` covers `*.example.work` — **one** level, not two. `auth.polaris.example.work` fails with `SSL routines::ssl/tls alert handshake failure`, while `auth-polaris.example.work` works. Same reason this repo has `auth-dev.spekto.live`, not `auth.dev.spekto.live`, for `spekto-dev`.
+
+Checklist for a new `auth_host` behind the same tunnel as the rest of the fleet:
+
+1. `cloudflared tunnel route dns --overwrite-dns <tunnel-id> <auth_host>`
+2. Add an ingress row to `/etc/cloudflared/config.yml` pointing `<auth_host>` at `http://localhost:<KAUTH_HTTP_PORT>` — the same port the other auth hosts use.
+3. `cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate` before restarting.
+4. `systemctl restart kauth` (picks up the new service row into the registry cache) and `systemctl restart cloudflared` (shared with every other service behind the tunnel — a brief interruption for all of them, not just the new one).
+
+### Protecting a site with no backend of its own
+
+A plain static site (no server-side code) can't run an OIDC flow itself — it has nowhere to receive `?token=...` and no way to set a cookie from it. The fix is a thin auth gate in front of `http.FileServer`, not building OIDC into kauth for static files:
+
+- A request without a valid cookie → 302 to `https://<auth_host>/login?redirect_uri=<callback_url>`.
+- `callback_url` is an endpoint on the gate process itself (e.g. `/auth/callback`), which reads `?token=...`, verifies it against kauth's JWKS, and sets the cookie itself before handing off to the file server.
+- **kauth signs tokens without a `kid` in the JWT header in practice** — only the JWKS lookup publishes a fixed `kid` (`kauth-1`). A gate that insists on an exact `kid` match against the token's header will reject otherwise-valid tokens. Try every key JWKS returns instead when the `kid` is missing or not found in the cache.
+- The refresh token (`rt`) comes back from `/dispatch` as a URL **fragment** (`#rt=...`), not a query param — it never reaches a server. A gate with no JS layer can't capture it, and shouldn't try. Set the service's `access_token_ttl` a bit longer than kauth's default instead (e.g. `PT12H`) and let users re-authenticate less often, rather than building refresh rotation into the gate.
+
+Reference implementation: `authgate/` in the univers repo (same host) — plain Go, no external dependencies, ~300 lines.
+
+Because access tokens are stateless, neither kauth nor a gate like this can stop an already-issued, unexpired token — deactivating a user in kauth only takes effect on their next login/refresh. If a single user needs to be forced out immediately without touching other services behind the same kauth instance, that has to be solved locally in the gate (see "Forcing a user out" in `authgate/README.md`) — a small file mapping email to a timestamp, checked against the token's `iat` on every request.
+
 ## Setting up Google OIDC
 
 Per service, or globally for all of them. Per service is recommended when the services live on different domains, since Google requires the redirect URI to be whitelisted on the OAuth client.
@@ -160,6 +184,14 @@ Same recipe, but in the [Microsoft Entra Admin Center](https://entra.microsoft.c
 5. Set `auth_microsoft = 1`.
 
 The Microsoft flow uses the `/common` endpoint and verifies the ID token with `SkipIssuerCheck`, because personal and work accounts carry different `iss` claims. Signature verification stays strict.
+
+### Finding the app registration again in Entra
+
+When a new service shares a Microsoft client with an existing one (same global `microsoft_client_id`), you have to find the *App registration* object in the right tenant — not the *Enterprise application* object, which looks almost identical but has no redirect URIs. Three real gotchas:
+
+- **Wrong tenant**: your account may have access to several Entra directories. "Default Directory" with 0 apps is almost never the right place. Use the directory switcher top-right, or try the classic Azure portal (`portal.azure.com`) if entra.microsoft.com doesn't list enough directories.
+- **Enterprise Application ≠ App registration**: finding the app via the Enterprise Applications list lands you on a page with no Authentication blade at all. Go to **Identity → Applications → App registrations** instead, and search by Application (client) ID.
+- **The Authentication page shows one platform at a time**: the app registration's Overview page has a link that counts redirect URIs (e.g. "1 web") — click that number directly to jump to the right platform section, instead of hunting through the Authentication tab manually.
 
 ## Setting up magic links (email sign-in)
 
