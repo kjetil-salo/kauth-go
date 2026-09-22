@@ -22,6 +22,10 @@ type Claims struct {
 	Groups   []string `json:"groups"`
 	Name     string   `json:"name,omitempty"`
 	TokenUse string   `json:"token_use"`
+	// Nonce speiles fra authorization-requesten (kun id_token, OIDC Core §2)
+	// — lar klienten koble et id_token til nettopp sin egen /authorize-runde
+	// og avvise et gjenbrukt/stjålet token fra en annen økt.
+	Nonce string `json:"nonce,omitempty"`
 }
 
 // Issuer utsteder og validerer RS256 JWTs.
@@ -154,9 +158,40 @@ func (i *Issuer) IssueAccess(user gen.User, svc gen.Service) (string, error) {
 	return i.sign(i.buildClaims(user, ttl, "access"))
 }
 
+// IssueAccessForAudience er IssueAccess, men med aud satt til den
+// oppgitte klienten. Brukt av authorization_code-grant: et access-token
+// utstedt til en ekstern klient bør bære en aud en ressursserver KAN
+// håndheve, i motsetning til det vanlige access-tokenet (utstedt til
+// tjenester vi selv kontrollerer, der aud historisk ikke har vært satt).
+func (i *Issuer) IssueAccessForAudience(user gen.User, svc gen.Service, aud string) (string, error) {
+	ttl := i.defaultTTL
+	if d, err := ParseISO8601Duration(svc.AccessTokenTtl); err == nil && d > 0 {
+		ttl = d
+	}
+	claims := i.buildClaims(user, ttl, "access")
+	claims.Audience = jwt.ClaimStrings{aud}
+	return i.sign(claims)
+}
+
 // IssueWithTTL utsteder et access-token med eksplisitt TTL. Brukes bl.a. for negative TTL i tester.
 func (i *Issuer) IssueWithTTL(user gen.User, svc gen.Service, ttl time.Duration) (string, error) {
 	return i.sign(i.buildClaims(user, ttl, "access"))
+}
+
+// IssueIDToken utsteder et ekte OIDC id_token (OIDC Core §2): aud=client_id
+// (=tjeneste-ID, se service.Registry) og nonce speilet fra
+// /authorize-requesten. Atskilt fra IssueAccess — et access-token har ingen
+// aud/nonce og skal ikke tolkes som identitetsbevis av en klient, kun som
+// bearer-credential mot ressursservere som stoler på kauth.
+func (i *Issuer) IssueIDToken(user gen.User, svc gen.Service, nonce string) (string, error) {
+	ttl := i.defaultTTL
+	if d, err := ParseISO8601Duration(svc.AccessTokenTtl); err == nil && d > 0 {
+		ttl = d
+	}
+	claims := i.buildClaims(user, ttl, "id")
+	claims.Audience = jwt.ClaimStrings{svc.ID}
+	claims.Nonce = nonce
+	return i.sign(claims)
 }
 
 // IssueAdmin utsteder et admin-token. Hvis adminTTL <= 0 brukes Issuer sin standard adminTTL.
@@ -211,6 +246,12 @@ func (i *Issuer) DiscoveryHandler() http.HandlerFunc {
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":      []string{"S256"},
+		"scopes_supported":                      []string{"openid", "email", "profile"},
+		// "none": kauth støtter kun offentlige OIDC-klienter (PKCE, ikke
+		// client secret) — se doc/FEATURES.md#oidc-authorization_code--pkce.
+		"token_endpoint_auth_methods_supported": []string{"none"},
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
