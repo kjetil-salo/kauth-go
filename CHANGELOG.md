@@ -16,6 +16,10 @@ Alle merkbare endringer i prosjektet dokumenteres her. Format inspirert av [Keep
 - Tjenestenes taglines er oversatt per tjeneste i `internal/i18n/taglines.go`. `services.tagline` brukes som fallback for tjenester som ennå ikke er oversatt.
 - Feilmeldingene i magic-link-verifiseringen er lokalisert: utløpt/brukt lenke og manglende konto redirecter til `/magic-login?error=<kode>&lang=<locale>` i stedet for å svare med norsk plaintext. Magic-lenken i e-posten bærer `&lang=` så et eksplisitt språkvalg overlever turen via e-postklienten.
 
+### Security
+
+- `checkPolicy` (`require_role`/`enforce_org`) håndheves nå fra alle fire innloggingsveiene — magic-link og passord kalte den ikke i det hele tatt tidligere, kun Google og Microsoft gjorde ([#3](https://github.com/zral/kauth-go/issues/3), funnet i kodegjennomgangen av PR #1). En bruker uten en tjenestes påkrevde rolle/org kunne dermed logge inn dit via magic-link eller passord, uavhengig av hva `require_role`/`enforce_org` sa. Samtidig strammet `checkPolicy` inn til å matche CSV-feltet eksakt per felt (splittet på komma) i stedet for `strings.Contains` — et krav om rollen `admin` godtok tidligere feilaktig en bruker med kun `sysadmin` i `roles` ([#2](https://github.com/zral/kauth-go/issues/2)).
+
 ### Changed
 
 - Serverfeil i magic-link-verifiseringen logges nå med `slog.Error` og spesifikk årsak, mens brukeren får én generisk oversatt melding. Tidligere ble tekniske detaljer vist på skjermen uten at noe ble logget.

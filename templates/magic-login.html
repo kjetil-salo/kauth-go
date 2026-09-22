@@ -143,6 +143,7 @@
             {{else if eq .Error "rate"}}{{.T.ErrTooManyRequests}}
             {{else if eq .Error "invalid_redirect"}}{{.T.ErrInvalidRedirect}}
             {{else if eq .Error "no_account"}}{{.T.ErrNoAccount}}
+            {{else if eq .Error "access_denied"}}{{.T.ErrAccessDenied}}
             {{else}}{{.Error}}
             {{end}}
         </div>

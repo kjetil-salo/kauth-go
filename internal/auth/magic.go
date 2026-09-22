@@ -247,6 +247,16 @@ func (h *MagicHandlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// require_role/enforce_org håndheves nå her — tidligere ble magic link
+	// (i motsetning til Google/Microsoft) aldri sjekket mot disse, slik at en
+	// bruker uten en tjenestes påkrevde rolle likevel kunne logge inn dit via
+	// magic link (github.com/zral/kauth-go/issues/3).
+	if err := checkPolicy(user, svc); err != nil {
+		h.aud.Log(r.Context(), audit.Event{Type: "login_failed", AuthMethod: "magic_link", Email: user.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false, Details: err.Error()})
+		h.redirectWithError(w, r, svc.ID, "access_denied", locale)
+		return
+	}
+
 	accessToken, err := h.issuer.IssueAccess(user, *svc)
 	if err != nil {
 		slog.Error("magic-link: kunne ikke utstede access-token", "email", user.Email, "service", svc.ID, "error", err)
