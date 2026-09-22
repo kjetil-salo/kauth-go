@@ -132,24 +132,39 @@ redirecter til `redirect_uri?code=&state=` (bygget med `url.Parse` +
 allerede ha egne query-parametre) — aldri med et token i klartekst i URL-en,
 i motsetning til den eksisterende bespoke flyten.
 
-#### To lag forsvar mot en gjenlevende oidc_authz-cookie
+#### Hvorfor tilgangsreglene håndheves i `/token`, ikke i `/dispatch`
 
-Cookien er usignert (samme tillitsmodell som den eksisterende redirect_uri-
-cookien) og lever i 10 minutter — lenge nok til at en person kan starte en
-OIDC-runde mot klient A, avbryte, og deretter logge inn på en helt urelatert
-intern tjeneste B innenfor det vinduet. Uten mottiltak ville /dispatch ha
-utstedt en A-kode basert på B sin innlogging, uten at A sine egne
-`require_role`/`enforce_org`-regler (evaluert i login-handleren for den
-tjenesten personen faktisk logget inn på) noensinne ble vurdert for A. To
-uavhengige sjekker lukker dette:
+Første forsøk på denne herdingen la en `?service=`-sjekk i `/dispatch`: krev
+at URL-ens `?service=`-parameter er identisk med `oidcReq.ClientID` før en
+kode utstedes. Det viste seg utilstrekkelig, og verdt å forklare hvorfor,
+siden feilen er lett å gjenta.
 
-1. `/login` rydder cookien proaktivt hver gang en forespørsel IKKE er en
-   OIDC-forespørsel.
-2. `/dispatch` sin Nivå 0 krever i tillegg at `?service=`-parameteren (satt
-   av alle fire login-handlerne til tjenesten personen faktisk fullførte
-   innlogging mot) er identisk med `oidcReq.ClientID`, og verifiserer
-   `redirect_uri` mot allowlisten på nytt — det er her cookien faktisk
-   brukes, og en usignert cookie skal aldri stoles blindt på akkurat der.
+`?service=` er en vanlig URL-parameter — ikke en verdi bundet til tokenet.
+Et vanlig access-token har ingen `aud`, så `/dispatch` kan ikke vite hvilken
+tjeneste et gitt token faktisk ble utstedt for; den kan bare lese hva URL-en
+*påstår*. En bruker med et helt legitimt token for tjeneste B (som de har
+lovlig tilgang til) kan derfor, mens en `oidc_authz`-cookie for tjeneste A
+ligger fra tidligere (fra å ha klikket "logg inn" i partner-app A, uten å
+fullføre den runden), gå rett til `/dispatch?token=<B-token>&service=A` —
+uten noensinne å ha gått via A sin egen login-handler, der A sine
+`require_role`/`enforce_org`-regler normalt håndheves. `?service=`-sjekken
+passerer (URL-en er internt konsistent), og en A-kode utstedes til en
+bruker som aldri har blitt vurdert mot A sine regler.
+
+Løsningen: `/token` er det ENESTE stedet i hele flyten som kan vite sikkert
+hvilken tjeneste som skal autorisere brukeren, fordi det er der `svc` slås
+opp fra koden selv (`row.ServiceID`), ikke fra en URL-parameter klienten
+kontrollerer. `authorizationCodeGrant` kaller derfor `checkPolicy(user, svc)`
+— samme funksjon Google-flyten allerede bruker (`google.go`) — rett etter
+`GetActiveUserByEmail`, og avviser med `invalid_grant` hvis brukeren mangler
+`RequireRole` eller ikke er i `EnforceOrg`-organisasjonen. Dette gjelder
+uansett hvor gyldig koden og PKCE-verifiseringen er.
+
+`/login` rydder fortsatt en gjenlevende `oidc_authz`-cookie proaktivt i sin
+ikke-OIDC-gren, og `/dispatch` beholder `?service=`-sjekken — begge er
+fortsatt fornuftig hygiene og feiler trygt (retur til `/login` er aldri
+skadelig), men ingen av dem er nå det som faktisk beskytter mot
+tilgangsomgåelse. Det er `checkPolicy` i `/token` som gjør den jobben.
 
 ### Innløsning (`POST /token`, `grant_type=authorization_code`)
 
@@ -166,12 +181,16 @@ forespørsel som refresh). For `authorization_code`:
 4. `code_verifier` hashes (SHA-256 → base64url) og sammenlignes mot lagret
    `code_challenge` — kun `S256` støttes, `plain` tilbys bevisst ikke (ingen
    reell beskyttelse). Alltid håndhevet, ikke betinget av noe tjenesteflagg
-5. Ved suksess utstedes access- og refresh-token, med access-tokenet utstedt
+5. `checkPolicy(user, svc)` — samme funksjon Google-flyten bruker — kjøres
+   på nytt mot tjenesten koden faktisk tilhører (`row.ServiceID`, ikke noen
+   URL-parameter). Dette er den reelle beskyttelsen mot tilgangsomgåelse,
+   se forklaringen over
+6. Ved suksess utstedes access- og refresh-token, med access-tokenet utstedt
    via `Issuer.IssueAccessForAudience` — `aud`=client_id, i motsetning til
    det vanlige access-tokenet fra `IssueAccess` (utstedt til tjenester vi
    selv kontrollerer, uten `aud`). Riktig for et token som nå kan havne hos
    en ressursserver på en ekstern parts side
-6. `id_token` (`Issuer.IssueIDToken`, `aud`=client_id, `nonce` speilet fra
+7. `id_token` (`Issuer.IssueIDToken`, `aud`=client_id, `nonce` speilet fra
    requesten) utstedes KUN hvis scope inneholder `openid` (OIDC Core
    §3.1.3.3) — en ren OAuth2-klient som aldri ba om `openid` skal ikke få et
    identitetstoken den ikke forventer

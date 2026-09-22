@@ -149,6 +149,24 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Kritisk: svc.RequireRole/EnforceOrg må håndheves HER, ikke antas
+	// dekket av at brukeren en gang logget inn et sted. /dispatch sin
+	// service-ID-sjekk (q.Get("service") == oidcReq.ClientID) er IKKE nok —
+	// den er en URL-parameter angriperen selv styrer når /dispatch kalles
+	// direkte, ikke en verdi bundet til tokenet (vanlige access-tokens har
+	// ingen aud). En bruker med et gyldig token for tjeneste B kan derfor gå
+	// rett til /dispatch?token=<B-token>&service=A og få en A-kode uten å
+	// noensinne ha gått via A sin login-handler, der checkPolicy normalt
+	// ville stoppet dem. Denne sjekken er derfor det ENESTE stedet i hele
+	// authorization_code-flyten som faktisk håndhever A sine tilgangsregler
+	// — se PR-diskusjonen (github.com/zral/kauth-go/pull/1) for det fulle
+	// angrepsscenarioet.
+	if err := checkPolicy(user, svc); err != nil {
+		h.aud.Log(r.Context(), audit.Event{Type: "authorization_code_policy_denied", Email: user.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false})
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+		return
+	}
+
 	nonce := ""
 	if row.Nonce != nil {
 		nonce = *row.Nonce
