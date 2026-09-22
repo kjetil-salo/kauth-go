@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -72,8 +73,15 @@ func setupOIDCDispatchTest(t *testing.T) (*auth.DispatchHandler, *gen.Queries, g
 		ID: "veivakt", DisplayName: "Veivakt", Domain: "veivakt.app",
 		CallbackUrl: "https://veivakt.app/auth/callback",
 		Theme:       "light", AccentColor: "#000", EmailFromName: "Veivakt",
-		AutoRegister: 1, AuthGoogle: 1, RequiresPkce: 1,
+		AutoRegister: 1, AuthGoogle: 1,
 		JwtCookieName: "auth_token", AccessTokenTtl: "PT15M",
+		Active: 1, UpdatedAt: now,
+	}))
+	require.NoError(t, q.CreateService(ctx, gen.CreateServiceParams{
+		ID: "minliste", DisplayName: "MinListe", Domain: "minliste.efugl.no",
+		CallbackUrl: "https://minliste.efugl.no/auth/callback",
+		Theme:       "light", AccentColor: "#000", EmailFromName: "MinListe",
+		AuthGoogle: 1, JwtCookieName: "auth_token", AccessTokenTtl: "PT15M",
 		Active: 1, UpdatedAt: now,
 	}))
 	user, err := q.CreateUser(ctx, gen.CreateUserParams{
@@ -104,7 +112,7 @@ func TestDispatch_OIDCCookiePresent_IssuesAuthorizationCode(t *testing.T) {
 		State: "state-abc", Nonce: "nonce-xyz", CodeChallenge: "c", CodeChallengeMethod: "S256",
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/dispatch?token="+at, nil)
+	req := httptest.NewRequest(http.MethodGet, "/dispatch?token="+at+"&service=veivakt", nil)
 	for _, c := range w0.Result().Cookies() {
 		req.AddCookie(c)
 	}
@@ -125,4 +133,79 @@ func TestDispatch_OIDCCookiePresent_IssuesAuthorizationCode(t *testing.T) {
 		}
 	}
 	require.True(t, cleared, "oidc_authz-cookien skal slettes etter at koden er utstedt")
+}
+
+// Regresjonstest for sikkerhetshullet Lars fant i review: en oidc_authz-
+// cookie fra en avbrutt OIDC-runde mot "veivakt" må IKKE kunne kapre en
+// påfølgende, urelatert innlogging mot "minliste". Uten service-ID-sjekken
+// ville dispatch ha utstedt en veivakt-kode basert på minliste sin
+// innlogging, uten at veivakt sine egne tilgangsregler noensinne ble
+// evaluert.
+func TestDispatch_OIDCCookiePresent_ServiceMismatchDiscardsCookie(t *testing.T) {
+	h, _, user, iss := setupOIDCDispatchTest(t)
+	minliste := h.Registry.Resolve("", "minliste", "")
+	require.NotNil(t, minliste)
+	at, err := iss.IssueAccess(user, *minliste)
+	require.NoError(t, err)
+
+	w0 := httptest.NewRecorder()
+	auth.SetOIDCAuthorizeCookie(w0, auth.OIDCAuthorizeRequest{
+		ClientID: "veivakt", RedirectURI: "https://veivakt.app/auth/callback",
+		State: "state-abc", CodeChallenge: "c", CodeChallengeMethod: "S256",
+	})
+
+	// Personen logget faktisk inn på minliste (?service=minliste) — ikke
+	// veivakt, som den gjenværende cookien påstår.
+	req := httptest.NewRequest(http.MethodGet, "/dispatch?token="+at+"&service=minliste", nil)
+	for _, c := range w0.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	h.ServeDispatch(w, req)
+
+	loc := w.Header().Get("Location")
+	require.NotContains(t, loc, "veivakt", "skal ALDRI utstede en veivakt-kode basert på en minliste-innlogging")
+	require.False(t, strings.Contains(loc, "code="), "skal ikke utstede noen kode i det hele tatt når service-ID ikke matcher")
+}
+
+// En registrert redirect_uri kan ha egne query-parametre fra før
+// (?tab=login e.l.) — koden skal legges til med &, ikke produsere en
+// ugyldig URL med to "?"-tegn.
+func TestDispatch_OIDCCookiePresent_RedirectURIWithExistingQueryParams(t *testing.T) {
+	h, q, user, iss := setupOIDCDispatchTest(t)
+	ctx := context.Background()
+	svc, err := q.GetServiceByID(ctx, "veivakt")
+	require.NoError(t, err)
+	svc.CallbackUrl = "https://veivakt.app/auth/callback,https://veivakt.app/auth/callback?tab=login"
+	require.NoError(t, q.UpdateService(ctx, gen.UpdateServiceParams{
+		DisplayName: svc.DisplayName, Domain: svc.Domain, CallbackUrl: svc.CallbackUrl,
+		Theme: svc.Theme, AccentColor: svc.AccentColor, EmailFromName: svc.EmailFromName,
+		AutoRegister: svc.AutoRegister, AuthGoogle: svc.AuthGoogle,
+		JwtCookieName: svc.JwtCookieName, AccessTokenTtl: svc.AccessTokenTtl,
+		Active: svc.Active, UpdatedAt: svc.UpdatedAt, ID: "veivakt",
+	}))
+	require.NoError(t, h.Registry.Invalidate(ctx))
+
+	at, err := iss.IssueAccess(user, svc)
+	require.NoError(t, err)
+
+	w0 := httptest.NewRecorder()
+	auth.SetOIDCAuthorizeCookie(w0, auth.OIDCAuthorizeRequest{
+		ClientID: "veivakt", RedirectURI: "https://veivakt.app/auth/callback?tab=login",
+		State: "s1", CodeChallenge: "c", CodeChallengeMethod: "S256",
+	})
+	req := httptest.NewRequest(http.MethodGet, "/dispatch?token="+at+"&service=veivakt", nil)
+	for _, c := range w0.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	h.ServeDispatch(w, req)
+
+	loc := w.Header().Get("Location")
+	parsed, err := url.Parse(loc)
+	require.NoError(t, err, "redirect-URL-en skal være gyldig selv når redirect_uri hadde query-parametre fra før")
+	require.Equal(t, "/auth/callback", parsed.Path)
+	require.Equal(t, "login", parsed.Query().Get("tab"), "eksisterende query-parameter skal bevares")
+	require.NotEmpty(t, parsed.Query().Get("code"))
+	require.Equal(t, "s1", parsed.Query().Get("state"))
 }

@@ -102,6 +102,13 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		writeTokenError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
+	// RFC 7636 §4.1: 43-128 tegn. En kortere/lengre verdi er aldri gyldig —
+	// avvis før vi i det hele tatt bruker den, samme prinsipp som å ikke
+	// hashe et opplagt for kort passord.
+	if len(verifier) < 43 || len(verifier) > 128 {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+		return
+	}
 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	row, err := h.queries.ConsumeAuthorizationCode(r.Context(), gen.ConsumeAuthorizationCodeParams{
@@ -128,19 +135,12 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		return
 	}
 
-	if svc.RequiresPkce == 1 {
-		challenge, method := "", ""
-		if row.CodeChallenge != nil {
-			challenge = *row.CodeChallenge
-		}
-		if row.CodeChallengeMethod != nil {
-			method = *row.CodeChallengeMethod
-		}
-		if !VerifyPKCE(verifier, challenge, method) {
-			h.aud.Log(r.Context(), audit.Event{Type: "pkce_verification_failed", Email: row.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false})
-			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
-			return
-		}
+	// PKCE er obligatorisk for enhver kode utstedt via denne flyten — ingen
+	// per-tjeneste unntak (se migrasjon 007: code_challenge er NOT NULL).
+	if !VerifyPKCE(verifier, row.CodeChallenge, row.CodeChallengeMethod) {
+		h.aud.Log(r.Context(), audit.Event{Type: "pkce_verification_failed", Email: row.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false})
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+		return
 	}
 
 	user, err := h.queries.GetActiveUserByEmail(r.Context(), row.Email)
@@ -153,12 +153,12 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 	if row.Nonce != nil {
 		nonce = *row.Nonce
 	}
-	idToken, err := h.issuer.IssueIDToken(user, *svc, nonce)
-	if err != nil {
-		http.Error(w, "intern feil", http.StatusInternalServerError)
-		return
+	scope := ""
+	if row.Scope != nil {
+		scope = *row.Scope
 	}
-	at, err := h.issuer.IssueAccess(user, *svc)
+
+	at, err := h.issuer.IssueAccessForAudience(user, *svc, clientID)
 	if err != nil {
 		http.Error(w, "intern feil", http.StatusInternalServerError)
 		return
@@ -175,14 +175,37 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 	if err != nil || ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"access_token":  at,
-		"id_token":      idToken,
 		"refresh_token": rt,
 		"token_type":    "Bearer",
 		"expires_in":    int64(ttl.Seconds()),
-	})
+	}
+	// id_token er en OIDC-ting (OIDC Core §3.1.3.3): utstedes kun når
+	// openid-scopet faktisk ble bedt om. En ren OAuth2-klient som aldri ba
+	// om openid skal ikke få et identitetstoken den ikke forventer.
+	if scopeContains(scope, "openid") {
+		idToken, err := h.issuer.IssueIDToken(user, *svc, nonce)
+		if err != nil {
+			http.Error(w, "intern feil", http.StatusInternalServerError)
+			return
+		}
+		resp["id_token"] = idToken
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// scopeContains sjekker om et mellomromseparert scope-felt inneholder en
+// eksakt scope-verdi (ikke substreng-match — "openidconnect" skal ikke
+// telle som "openid").
+func scopeContains(scope, want string) bool {
+	for _, s := range strings.Fields(scope) {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // RefreshToken — POST /token

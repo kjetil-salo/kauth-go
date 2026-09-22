@@ -14,10 +14,12 @@ import (
 // innloggingsreisen (magic link, Google, Microsoft, passord) i en cookie,
 // slik redirect_uri-cookien allerede bærer callback-mål for Google-flyten.
 // Trust boundary: verdiene her stoles ikke på i seg selv — dispatch.go
-// verifiserer RedirectURI mot tjenestens registrerte allowlist før bruk, og
-// /token verifiserer CodeChallenge mot en client-oppgitt code_verifier før
-// koden løses inn. Cookien er derfor ikke signert, samme tillitsmodell som
-// den eksisterende redirect_uri-cookien.
+// verifiserer på nytt, ved bruk, at (1) ClientID er identisk med
+// tjenesten personen faktisk fullførte innlogging mot, og (2) RedirectURI
+// er i tjenestens registrerte allowlist. /token verifiserer i tillegg
+// CodeChallenge mot en client-oppgitt code_verifier før koden løses inn.
+// Cookien er derfor ikke signert, samme tillitsmodell som den eksisterende
+// redirect_uri-cookien — begge sjekkes fullt ut der de faktisk brukes.
 type OIDCAuthorizeRequest struct {
 	ClientID            string
 	RedirectURI         string
@@ -130,6 +132,43 @@ func VerifyPKCE(verifier, challenge, method string) bool {
 	sum := sha256.Sum256([]byte(verifier))
 	computed := base64.RawURLEncoding.EncodeToString(sum[:])
 	return computed == challenge
+}
+
+// redirectWithOIDCError sender brukeren tilbake til klienten med en
+// feilkode (RFC 6749 §4.1.2.1), IKKE en 400 fra kauth selv — men kun etter
+// at redirect_uri allerede er bekreftet mot tjenestens allowlist av
+// kalleren. Å redirecte FØR den sjekken ville vært en open redirect.
+func redirectWithOIDCError(w http.ResponseWriter, r *http.Request, redirectURI, errCode, state string) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		http.Error(w, "intern feil", http.StatusInternalServerError)
+		return
+	}
+	q := u.Query()
+	q.Set("error", errCode)
+	if state != "" {
+		q.Set("state", state)
+	}
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusSeeOther)
+}
+
+// buildRedirectWithCode setter ?code=&state= på redirectURI via url.Parse +
+// Query().Set, ikke naiv strengkonkatenering — en registrert redirect_uri
+// kan allerede ha egne query-parametre (?tab=login e.l.), og en hardkodet
+// "?code=" ville da produsert en ugyldig URL med to "?"-tegn.
+func buildRedirectWithCode(redirectURI, code, state string) (string, error) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("code", code)
+	if state != "" {
+		q.Set("state", state)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // GenerateAuthorizationCode lager en kryptografisk tilfeldig, urlsafe

@@ -90,12 +90,30 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 
 	// Nivå 0: standard OIDC authorization_code-flyt. oidc_authz-cookien ble
 	// satt av LoginHandler.ServeLogin når forespørselen inneholdt
-	// response_type=code&client_id=... — redirect_uri og (ev.) PKCE-krav er
-	// allerede validert der. Her genereres selve koden og brukeren sendes
-	// til klientens redirect_uri med ?code=&state=, IKKE med et token i
-	// klartekst — koden løses inn på /token (grant_type=authorization_code).
+	// response_type=code&client_id=... — men cookien er USIGNERT (samme
+	// tillitsmodell som redirect_uri-cookien), så alt den sier gjennomkjøres
+	// på nytt her, der den faktisk brukes:
+	//
+	//  1. service-ID-en personen faktisk logget inn på (?service=, satt av
+	//     alle fire login-handlerne) må være IDENTISK med oidcReq.ClientID.
+	//     Uten denne sjekken kan en avbrutt OIDC-runde (cookien lever i 10
+	//     min) kapre en helt urelatert påfølgende innlogging: person starter
+	//     OIDC mot klient A, avbryter, logger inn på intern tjeneste B —
+	//     uten sjekken ville /dispatch ha utstedt en A-kode for B sin
+	//     innlogging, og B sine egne require_role/enforce_org-regler (som
+	//     evalueres i login-handleren for B, ikke her) blir aldri vurdert
+	//     for A. Se ServeLogin, som i tillegg rydder cookien proaktivt i
+	//     ikke-OIDC-grenen — dette er andre laget i samme forsvar.
+	//  2. redirect_uri verifiseres mot tjenestens allowlist på nytt, av
+	//     samme grunn — /login sin validering er ikke noe /dispatch kan
+	//     stole på en usignert cookie for å ha faktisk skjedd.
 	if oidcReq, ok := ReadOIDCAuthorizeCookie(r); ok {
 		ClearOIDCAuthorizeCookie(w)
+		svc := h.Registry.Resolve("", oidcReq.ClientID, "")
+		if svc == nil || q.Get("service") != oidcReq.ClientID || !h.Registry.IsAllowedCallback(svc, oidcReq.RedirectURI) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
 		code, err := GenerateAuthorizationCode()
 		if err != nil {
 			http.Error(w, "intern feil", http.StatusInternalServerError)
@@ -109,8 +127,8 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 			RedirectUri:         oidcReq.RedirectURI,
 			Scope:               nullableStr(oidcReq.Scope),
 			Nonce:               nullableStr(oidcReq.Nonce),
-			CodeChallenge:       nullableStr(oidcReq.CodeChallenge),
-			CodeChallengeMethod: nullableStr(oidcReq.CodeChallengeMethod),
+			CodeChallenge:       oidcReq.CodeChallenge,
+			CodeChallengeMethod: oidcReq.CodeChallengeMethod,
 			CreatedAt:           time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 			ExpiresAt:           expiresAt,
 		})
@@ -118,9 +136,10 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "intern feil", http.StatusInternalServerError)
 			return
 		}
-		target := oidcReq.RedirectURI + "?code=" + url.QueryEscape(code)
-		if oidcReq.State != "" {
-			target += "&state=" + url.QueryEscape(oidcReq.State)
+		target, err := buildRedirectWithCode(oidcReq.RedirectURI, code, oidcReq.State)
+		if err != nil {
+			http.Error(w, "intern feil", http.StatusInternalServerError)
+			return
 		}
 		http.Redirect(w, r, target, http.StatusSeeOther)
 		return

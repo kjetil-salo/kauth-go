@@ -90,21 +90,31 @@ En standard OIDC-forespørsel gjenkjennes på `response_type=code&client_id=...`
 `client_id` er samme verdi som tjenestens `services.id` — det finnes ingen
 egen klient-tabell, en OIDC-klient ER en tjeneste. Ved en slik forespørsel:
 
-1. Tjenesten resolves på `client_id` (ikke `?service=` eller host-header)
+1. Tjenesten resolves på `client_id` (ikke `?service=` eller host-header).
+   Ukjent `client_id` → 400 direkte fra kauth, ikke en redirect (det ville
+   vært en open redirect via en påfunnet client_id — kauth har ingen
+   betrodd redirect_uri å sende brukeren til før client_id er slått opp)
 2. `redirect_uri` må matche tjenestens `callback_url`-allowlist eksakt
-   (samme `Registry.IsAllowedCallback` som Google-flyten bruker)
-3. Hvis tjenesten har `requires_pkce=1`: `code_challenge` og
-   `code_challenge_method=S256` er påkrevd, ellers avvises forespørselen med
-   400 FØR brukeren ser innloggingssiden
+   (samme `Registry.IsAllowedCallback` som Google-flyten bruker). Ikke
+   registrert → 400, av samme grunn som over
+3. **PKCE er obligatorisk for enhver `response_type=code`-forespørsel —
+   ingen per-tjeneste unntak.** `code_challenge` og
+   `code_challenge_method=S256` må begge være til stede, ellers redirectes
+   brukeren til `redirect_uri?error=invalid_request&state=` (RFC 6749
+   §4.1.2.1 — redirect_uri er jo allerede bekreftet trygg i steg 2, så feilen
+   rapporteres dit, ikke som en 400 kauth selv viser fram). Det finnes ingen
+   konfidensiell klient-type i det hele tatt: `client_id` er offentlig
+   informasjon, og en kode uten PKCE ville kunnet løses inn av hvem som
+   helst som fanget den opp underveis
 4. Hele forespørselen (client_id, redirect_uri, state, nonce, scope,
-   code_challenge, code_challenge_method) lagres i en `oidc_authz`-cookie og
-   bæres videre gjennom resten av innloggingsreisen — magic link, Google,
-   Microsoft eller passord er alle uendret og ser ingenting av dette
+   code_challenge, code_challenge_method) lagres i en **usignert**
+   `oidc_authz`-cookie og bæres videre gjennom resten av innloggingsreisen —
+   magic link, Google, Microsoft eller passord er alle uendret og ser
+   ingenting av dette
 
-`requires_pkce` markerer en tjeneste som en **offentlig klient** uten
-client secret — riktig for en ekstern app uten egen backend (f.eks. en
-nettleser-widget). En konfidensiell klient med server-side secret er ikke
-implementert (ingen kjent bruksdata krever det per nå).
+En vanlig (ikke-OIDC) `/login`-forespørsel rydder proaktivt en eventuell
+gjenværende `oidc_authz`-cookie fra en tidligere avbrutt OIDC-runde — se
+"To lag forsvar" under.
 
 ### Autorisasjonskoder
 
@@ -112,28 +122,66 @@ implementert (ingen kjent bruksdata krever det per nå).
 — vesentlig kortere enn magic-link sine 15 minutter, siden koden kun skal
 leve fra `/dispatch`-redirect til klientens umiddelbare innløsning) og
 engangsbrukt (`used`-flagg, samme "konsumer atomisk"-mønster som
-`ConsumeMagicToken`). `/dispatch` genererer koden idet en `oidc_authz`-cookie
-er til stede (etter at brukeren har fullført innlogging via en av de vanlige
-metodene), og redirecter til `redirect_uri?code=&state=` — aldri med et
-token i klartekst i URL-en, i motsetning til den eksisterende bespoke flyten.
+`ConsumeMagicToken`). `code_challenge`/`code_challenge_method` er `NOT NULL`
+i skjemaet — reflekterer at PKCE aldri er valgfritt.
+
+`/dispatch` genererer koden idet en `oidc_authz`-cookie er til stede (etter
+at brukeren har fullført innlogging via en av de vanlige metodene), og
+redirecter til `redirect_uri?code=&state=` (bygget med `url.Parse` +
+`Query().Set`, ikke strengkonkatenering — en registrert redirect_uri kan
+allerede ha egne query-parametre) — aldri med et token i klartekst i URL-en,
+i motsetning til den eksisterende bespoke flyten.
+
+#### To lag forsvar mot en gjenlevende oidc_authz-cookie
+
+Cookien er usignert (samme tillitsmodell som den eksisterende redirect_uri-
+cookien) og lever i 10 minutter — lenge nok til at en person kan starte en
+OIDC-runde mot klient A, avbryte, og deretter logge inn på en helt urelatert
+intern tjeneste B innenfor det vinduet. Uten mottiltak ville /dispatch ha
+utstedt en A-kode basert på B sin innlogging, uten at A sine egne
+`require_role`/`enforce_org`-regler (evaluert i login-handleren for den
+tjenesten personen faktisk logget inn på) noensinne ble vurdert for A. To
+uavhengige sjekker lukker dette:
+
+1. `/login` rydder cookien proaktivt hver gang en forespørsel IKKE er en
+   OIDC-forespørsel.
+2. `/dispatch` sin Nivå 0 krever i tillegg at `?service=`-parameteren (satt
+   av alle fire login-handlerne til tjenesten personen faktisk fullførte
+   innlogging mot) er identisk med `oidcReq.ClientID`, og verifiserer
+   `redirect_uri` mot allowlisten på nytt — det er her cookien faktisk
+   brukes, og en usignert cookie skal aldri stoles blindt på akkurat der.
 
 ### Innløsning (`POST /token`, `grant_type=authorization_code`)
 
 `/token` dispatcher nå på `grant_type` (tidligere behandlet enhver
 forespørsel som refresh). For `authorization_code`:
 
-1. Koden konsumeres atomisk (`ConsumeAuthorizationCode`) — ugyldig, brukt
+1. `code_verifier` sin lengde valideres (43-128 tegn, RFC 7636 §4.1) før den
+   i det hele tatt brukes til noe
+2. Koden konsumeres atomisk (`ConsumeAuthorizationCode`) — ugyldig, brukt
    eller utløpt kode gir generisk `invalid_grant`
-2. `client_id` og `redirect_uri` fra requesten må matche eksakt det koden
+3. `client_id` og `redirect_uri` fra requesten må matche eksakt det koden
    ble utstedt for (RFC 6749 §4.1.3) — hindrer at en kode avlyttet på ett
    sted løses inn med en annen redirect_uri
-3. Hvis tjenesten krever PKCE: `code_verifier` hashes (SHA-256 → base64url)
-   og sammenlignes mot lagret `code_challenge` — kun `S256` støttes, `plain`
-   tilbys bevisst ikke (ingen reell beskyttelse)
-4. Ved suksess utstedes et ekte `id_token` (`Issuer.IssueIDToken`) i tillegg
-   til access- og refresh-token. `id_token` har `aud`=client_id og `nonce`
-   speilet fra requesten — begge mangler på det vanlige access-tokenet, som
-   aldri er ment å tolkes som identitetsbevis av en klient
+4. `code_verifier` hashes (SHA-256 → base64url) og sammenlignes mot lagret
+   `code_challenge` — kun `S256` støttes, `plain` tilbys bevisst ikke (ingen
+   reell beskyttelse). Alltid håndhevet, ikke betinget av noe tjenesteflagg
+5. Ved suksess utstedes access- og refresh-token, med access-tokenet utstedt
+   via `Issuer.IssueAccessForAudience` — `aud`=client_id, i motsetning til
+   det vanlige access-tokenet fra `IssueAccess` (utstedt til tjenester vi
+   selv kontrollerer, uten `aud`). Riktig for et token som nå kan havne hos
+   en ressursserver på en ekstern parts side
+6. `id_token` (`Issuer.IssueIDToken`, `aud`=client_id, `nonce` speilet fra
+   requesten) utstedes KUN hvis scope inneholder `openid` (OIDC Core
+   §3.1.3.3) — en ren OAuth2-klient som aldri ba om `openid` skal ikke få et
+   identitetstoken den ikke forventer
+
+**Ressursserveres eget ansvar:** kauth setter nå `aud` på tokens utstedt via
+denne flyten, men om en intern ressursserver (minliste, bildegalleri,
+spekto, ...) faktisk validerer `aud` er opp til den serveren selv. Sjekk
+dette før en tjeneste faktisk åpnes for en ekstern OIDC-klient — hvis
+ressursserveren kun validerer signaturen, kan et token utstedt til
+partneren i prinsippet brukes mot den også.
 
 ### Cleanup
 
@@ -354,7 +402,7 @@ Seks SQLite-tabeller med WAL og foreign keys på:
 
 ### `services`
 
-Tjeneste-konfigurasjon. 30+ kolonner inkludert id, display_name, domain, auth_host, callback_url, branding (theme, accent_color, logo_html, bg_image, bg_css), auth-flagg (auth_google/microsoft/magic_link/password), `requires_pkce` (offentlig OIDC-klient uten client secret), OAuth-creds (per-service), TTL-er, default_role/org, is_default, active, updated_at.
+Tjeneste-konfigurasjon. 30+ kolonner inkludert id, display_name, domain, auth_host, callback_url, branding (theme, accent_color, logo_html, bg_image, bg_css), auth-flagg (auth_google/microsoft/magic_link/password), OAuth-creds (per-service), TTL-er, default_role/org, is_default, active, updated_at. `id` er også `client_id` for en tjeneste som bruker OIDC `authorization_code`-flyten — ingen egen klient-tabell.
 
 ### `users`
 

@@ -42,18 +42,16 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 }
 
 const deleteExpiredAuthorizationCodes = `-- name: DeleteExpiredAuthorizationCodes :exec
-DELETE FROM authorization_codes
-WHERE (used = 1 AND expires_at < ?)
-   OR expires_at < ?
+DELETE FROM authorization_codes WHERE expires
 `
 
-type DeleteExpiredAuthorizationCodesParams struct {
-	ExpiresAt   string `json:"expires_at"`
-	ExpiresAt_2 string `json:"expires_at_2"`
-}
-
-func (q *Queries) DeleteExpiredAuthorizationCodes(ctx context.Context, arg DeleteExpiredAuthorizationCodesParams) error {
-	_, err := q.db.ExecContext(ctx, deleteExpiredAuthorizationCodes, arg.ExpiresAt, arg.ExpiresAt_2)
+// Koder lever i 60 sekunder — i motsetning til magic_tokens trengs ingen
+// lengre nåde-periode for ubrukte koder, så én terskel er nok (påpekt i
+// kodegjennomgang: den opprinnelige (used=1 AND expires_at<?) OR expires_at<?
+// var alltid ekvivalent med bare expires_at<? når begge parametre er samme
+// tidspunkt).
+func (q *Queries) DeleteExpiredAuthorizationCodes(ctx context.Context, expiresAt string) error {
+	_, err := q.db.ExecContext(ctx, deleteExpiredAuthorizationCodes, expiresAt)
 	return err
 }
 
@@ -69,8 +67,8 @@ type InsertAuthorizationCodeParams struct {
 	RedirectUri         string  `json:"redirect_uri"`
 	Scope               *string `json:"scope"`
 	Nonce               *string `json:"nonce"`
-	CodeChallenge       *string `json:"code_challenge"`
-	CodeChallengeMethod *string `json:"code_challenge_method"`
+	CodeChallenge       string  `json:"code_challenge"`
+	CodeChallengeMethod string  `json:"code_challenge_method"`
 	CreatedAt           string  `json:"created_at"`
 	ExpiresAt           string  `json:"expires_at"`
 }

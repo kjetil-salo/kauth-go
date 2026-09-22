@@ -17,7 +17,7 @@ Running in production across a handful of services.
 - Issues JWTs (RS256)
 - Rotates refresh tokens with reuse detection (OAuth BCP §4.13)
 - Exposes JWKS and OpenID Discovery under `/.well-known/`
-- Speaks standard OIDC `authorization_code` + PKCE (RFC 6749 §4.1, RFC 7636) for services flagged `requires_pkce` — a real `id_token` with `aud`/`nonce`, so an external client you don't control the code of can plug in an off-the-shelf OIDC library instead of the bespoke token-in-URL flow. See [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
+- Speaks standard OIDC `authorization_code` + PKCE (RFC 6749 §4.1, RFC 7636, mandatory for every `response_type=code` request — no confidential-client exception) — a real `id_token` with `aud`/`nonce`, so an external client you don't control the code of can plug in an off-the-shelf OIDC library instead of the bespoke token-in-URL flow. See [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
 - Offers four sign-in paths per service: Google OIDC, Microsoft OIDC, email magic link, and passwords (the last one off by default — see *The passwordless choice* below)
 - Central user administration: one admin panel for every service
 - Audit log with 90-day retention, filterable on every column and exportable to CSV
@@ -107,13 +107,12 @@ The fields you'll set almost every time. The example values are the Polaris row 
 | `email_from_address` | `noreply@polaris.example.com` | Sender for magic links from this service. `NULL` uses global SMTP — see *Setting up magic links*. |
 | `jwt_cookie_name` | `auth_token` | The cookie the token is set in. Distinct names per service avoid collisions on a shared parent domain. |
 | `theme` / `accent_color` | `light` / `#2563EB` | Login page appearance. |
-| `requires_pkce` | `0` | `1` marks this service as a public OIDC client with no client secret (a browser widget, a mobile app, any client you don't control the backend of) — see below. |
 
 Once the row is in place, point the service's login flow at `https://<auth_host>/login?redirect_uri=https://<your-app>/auth/callback`. kauth handles the rest.
 
-### Onboarding an external OIDC client (`requires_pkce`)
+### Onboarding an external OIDC client
 
-A service you don't control the client code of — a partner integration doing "Sign in with Polaris" from their own app — can't safely hold a client secret, and it can't be handed the bespoke token-in-URL flow kauth's own apps use. Set `requires_pkce = 1` on its row instead, and it becomes a standard OIDC `authorization_code` + PKCE client: point any off-the-shelf OIDC library (`oidc-client-ts`, `authlib`, ...) at `https://<auth_host>/.well-known/openid-configuration`, and it drives `/login` (as `authorization_endpoint`) and `/token` (`grant_type=authorization_code`) itself — no kauth-specific glue code needed on their end. Full protocol detail in [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
+A service you don't control the client code of — a partner integration doing "Sign in with Polaris" from their own app — can't safely hold a client secret, and it can't be handed the bespoke token-in-URL flow kauth's own apps use. Point any off-the-shelf OIDC library (`oidc-client-ts`, `authlib`, ...) at `https://<auth_host>/.well-known/openid-configuration` instead: it drives `/login` (as `authorization_endpoint`, with PKCE — mandatory, no client secret involved) and `/token` (`grant_type=authorization_code`) itself, no kauth-specific glue code needed on their end. `client_id` is the service's own `id` — there's no separate client table. If they're a browser SPA calling `/token` directly, their origin needs to be in `KAUTH_CORS_ORIGINS` too (see *CORS origins for the refresh flow* above — the same origin list covers both grants). Full protocol detail in [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
 
 ### CORS origins for the refresh flow
 

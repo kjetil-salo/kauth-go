@@ -158,6 +158,21 @@ func (i *Issuer) IssueAccess(user gen.User, svc gen.Service) (string, error) {
 	return i.sign(i.buildClaims(user, ttl, "access"))
 }
 
+// IssueAccessForAudience er IssueAccess, men med aud satt til den
+// oppgitte klienten. Brukt av authorization_code-grant: et access-token
+// utstedt til en ekstern klient bør bære en aud en ressursserver KAN
+// håndheve, i motsetning til det vanlige access-tokenet (utstedt til
+// tjenester vi selv kontrollerer, der aud historisk ikke har vært satt).
+func (i *Issuer) IssueAccessForAudience(user gen.User, svc gen.Service, aud string) (string, error) {
+	ttl := i.defaultTTL
+	if d, err := ParseISO8601Duration(svc.AccessTokenTtl); err == nil && d > 0 {
+		ttl = d
+	}
+	claims := i.buildClaims(user, ttl, "access")
+	claims.Audience = jwt.ClaimStrings{aud}
+	return i.sign(claims)
+}
+
 // IssueWithTTL utsteder et access-token med eksplisitt TTL. Brukes bl.a. for negative TTL i tester.
 func (i *Issuer) IssueWithTTL(user gen.User, svc gen.Service, ttl time.Duration) (string, error) {
 	return i.sign(i.buildClaims(user, ttl, "access"))
@@ -234,6 +249,9 @@ func (i *Issuer) DiscoveryHandler() http.HandlerFunc {
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"scopes_supported":                      []string{"openid", "email", "profile"},
+		// "none": kauth støtter kun offentlige OIDC-klienter (PKCE, ikke
+		// client secret) — se doc/FEATURES.md#oidc-authorization_code--pkce.
+		"token_endpoint_auth_methods_supported": []string{"none"},
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

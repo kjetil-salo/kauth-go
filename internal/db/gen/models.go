@@ -25,8 +25,8 @@ type AuthorizationCode struct {
 	RedirectUri         string  `json:"redirect_uri"`
 	Scope               *string `json:"scope"`
 	Nonce               *string `json:"nonce"`
-	CodeChallenge       *string `json:"code_challenge"`
-	CodeChallengeMethod *string `json:"code_challenge_method"`
+	CodeChallenge       string  `json:"code_challenge"`
+	CodeChallengeMethod string  `json:"code_challenge_method"`
 	CreatedAt           string  `json:"created_at"`
 	ExpiresAt           string  `json:"expires_at"`
 	Used                int64   `json:"used"`
@@ -93,7 +93,6 @@ type Service struct {
 	Active                int64   `json:"active"`
 	UpdatedAt             string  `json:"updated_at"`
 	EmailFromAddress      *string `json:"email_from_address"`
-	RequiresPkce          int64   `json:"requires_pkce"`
 }
 
 type User struct {

@@ -81,20 +81,37 @@ func (h *LoginHandler) ServeLogin(w http.ResponseWriter, r *http.Request) {
 		oidcReq := ParseOIDCAuthorizeRequest(q)
 		svc := h.Registry.Resolve("", oidcReq.ClientID, "")
 		if svc == nil {
+			// Ukjent client_id: vi har ingen betrodd redirect_uri å sende
+			// brukeren til, så vi kan IKKE redirecte med en feilkode her
+			// (det ville vært en open redirect via en påfunnet client_id).
 			http.Error(w, "ukjent client_id", http.StatusBadRequest)
 			return
 		}
 		if !h.Registry.IsAllowedCallback(svc, oidcReq.RedirectURI) {
+			// Samme resonnement: redirect_uri er ikke bekreftet trygg ennå.
 			http.Error(w, "redirect_uri er ikke registrert for denne klienten", http.StatusBadRequest)
 			return
 		}
-		if svc.RequiresPkce == 1 && !(oidcReq.CodeChallengeMethod == "S256" && oidcReq.CodeChallenge != "") {
-			http.Error(w, "code_challenge (S256) er påkrevd for denne klienten", http.StatusBadRequest)
+		// Fra hit er redirect_uri bekreftet mot allowlisten, så videre feil
+		// rapporteres per spec (RFC 6749 §4.1.2.1) med en redirect til
+		// klienten — ikke en 400 kauth selv viser fram. PKCE er obligatorisk
+		// for enhver response_type=code-forespørsel (ingen per-tjeneste
+		// unntak — en offentlig OIDC-klient uten client secret har intet
+		// annet vern mot at en avlyttet kode løses inn av noen andre).
+		if !(oidcReq.CodeChallengeMethod == "S256" && oidcReq.CodeChallenge != "") {
+			redirectWithOIDCError(w, r, oidcReq.RedirectURI, "invalid_request", oidcReq.State)
 			return
 		}
 		SetOIDCAuthorizeCookie(w, oidcReq)
 		serviceID = svc.ID
 		redirectURI = ""
+	} else {
+		// En stale oidc_authz-cookie fra en avbrutt OIDC-runde må ikke få
+		// leve videre inn i en vanlig (ikke-OIDC) innlogging — /dispatch sin
+		// Nivå 0-sjekk ville ellers kunne utstede en kode til feil klient
+		// for den påfølgende innloggingen. Se også service-ID-sjekken i
+		// dispatch.go, som er det andre laget i samme forsvar.
+		ClearOIDCAuthorizeCookie(w)
 	}
 
 	svc := h.Registry.ResolveOrDefault(r.Host, serviceID, redirectURI)

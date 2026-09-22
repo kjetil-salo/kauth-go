@@ -17,10 +17,10 @@ SELECT * FROM services ORDER BY display_name;
 INSERT INTO services (id, display_name, tagline, domain, auth_host, callback_url,
     logo_html, bg_image, bg_css, theme, accent_color, email_from_name, email_from_address,
     auto_register, default_role, default_org, require_role, enforce_org, is_default,
-    auth_google, auth_microsoft, auth_magic_link, auth_password, requires_pkce,
+    auth_google, auth_microsoft, auth_magic_link, auth_password,
     google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret,
     jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
 
 -- name: UpdateService :exec
 UPDATE services SET
@@ -28,7 +28,7 @@ UPDATE services SET
     logo_html = ?, bg_image = ?, bg_css = ?, theme = ?, accent_color = ?,
     email_from_name = ?, email_from_address = ?, auto_register = ?, default_role = ?, default_org = ?,
     require_role = ?, enforce_org = ?, is_default = ?,
-    auth_google = ?, auth_microsoft = ?, auth_magic_link = ?, auth_password = ?, requires_pkce = ?,
+    auth_google = ?, auth_microsoft = ?, auth_magic_link = ?, auth_password = ?,
     google_client_id = ?, google_client_secret = ?,
     microsoft_client_id = ?, microsoft_client_secret = ?,
     jwt_cookie_name = ?, access_token_ttl = ?, refresh_token_max_age = ?,

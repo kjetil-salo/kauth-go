@@ -88,10 +88,7 @@ func (c *Cleanup) cleanRefreshTokens(ctx context.Context) {
 // i seg selv (used=1-koder er allerede ubrukelige, jf. ConsumeAuthorizationCode).
 func (c *Cleanup) cleanAuthorizationCodes(ctx context.Context) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	err := c.queries.DeleteExpiredAuthorizationCodes(ctx, gen.DeleteExpiredAuthorizationCodesParams{
-		ExpiresAt:   now,
-		ExpiresAt_2: now,
-	})
+	err := c.queries.DeleteExpiredAuthorizationCodes(ctx, now)
 	if err != nil {
 		log.Printf("cleanup: feil ved sletting av authorization codes: %v", err)
 		return

@@ -284,7 +284,6 @@ func buildCreateParams(r *http.Request, id, now string) gen.CreateServiceParams 
 		AuthMicrosoft:         checkboxInt(r, "auth_microsoft"),
 		AuthMagicLink:         checkboxInt(r, "auth_magic_link"),
 		AuthPassword:          checkboxInt(r, "auth_password"),
-		RequiresPkce:          checkboxInt(r, "requires_pkce"),
 		GoogleClientID:        nullableStr(r.FormValue("google_client_id")),
 		GoogleClientSecret:    nullableStr(r.FormValue("google_client_secret")),
 		MicrosoftClientID:     nullableStr(r.FormValue("microsoft_client_id")),
@@ -323,7 +322,6 @@ func buildUpdateParams(r *http.Request, id, now string) gen.UpdateServiceParams 
 		AuthMicrosoft:         cp.AuthMicrosoft,
 		AuthMagicLink:         cp.AuthMagicLink,
 		AuthPassword:          cp.AuthPassword,
-		RequiresPkce:          cp.RequiresPkce,
 		GoogleClientID:        cp.GoogleClientID,
 		GoogleClientSecret:    cp.GoogleClientSecret,
 		MicrosoftClientID:     cp.MicrosoftClientID,
@@ -407,7 +405,6 @@ func serviceFromForm(r *http.Request) gen.Service {
 		AuthPassword:     checkboxInt(r, "auth_password"),
 		IsDefault:        checkboxInt(r, "is_default"),
 		AutoRegister:     checkboxInt(r, "auto_register"),
-		RequiresPkce:     checkboxInt(r, "requires_pkce"),
 	}
 }
 
