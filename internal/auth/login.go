@@ -67,11 +67,35 @@ type LoginHandler struct {
 	Templates *template.Template
 }
 
-// ServeLogin håndterer GET /login.
-// Resolver tjeneste fra ?service=ID-parameter eller host-header.
+// ServeLogin håndterer GET /login — også kauths authorization_endpoint for
+// standard OIDC-klienter (response_type=code&client_id=...).
+// Resolver tjeneste fra ?service=ID-parameter, host-header, eller — for en
+// OIDC-forespørsel — ?client_id (client_id og tjeneste-ID er samme verdi,
+// se service.Registry).
 func (h *LoginHandler) ServeLogin(w http.ResponseWriter, r *http.Request) {
-	serviceID := r.URL.Query().Get("service")
-	redirectURI := r.URL.Query().Get("redirect_uri")
+	q := r.URL.Query()
+	serviceID := q.Get("service")
+	redirectURI := q.Get("redirect_uri")
+
+	if IsOIDCAuthorizeRequest(q) {
+		oidcReq := ParseOIDCAuthorizeRequest(q)
+		svc := h.Registry.Resolve("", oidcReq.ClientID, "")
+		if svc == nil {
+			http.Error(w, "ukjent client_id", http.StatusBadRequest)
+			return
+		}
+		if !h.Registry.IsAllowedCallback(svc, oidcReq.RedirectURI) {
+			http.Error(w, "redirect_uri er ikke registrert for denne klienten", http.StatusBadRequest)
+			return
+		}
+		if svc.RequiresPkce == 1 && !(oidcReq.CodeChallengeMethod == "S256" && oidcReq.CodeChallenge != "") {
+			http.Error(w, "code_challenge (S256) er påkrevd for denne klienten", http.StatusBadRequest)
+			return
+		}
+		SetOIDCAuthorizeCookie(w, oidcReq)
+		serviceID = svc.ID
+		redirectURI = ""
+	}
 
 	svc := h.Registry.ResolveOrDefault(r.Host, serviceID, redirectURI)
 	if svc == nil {

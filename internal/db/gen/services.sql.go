@@ -13,10 +13,10 @@ const createService = `-- name: CreateService :exec
 INSERT INTO services (id, display_name, tagline, domain, auth_host, callback_url,
     logo_html, bg_image, bg_css, theme, accent_color, email_from_name, email_from_address,
     auto_register, default_role, default_org, require_role, enforce_org, is_default,
-    auth_google, auth_microsoft, auth_magic_link, auth_password,
+    auth_google, auth_microsoft, auth_magic_link, auth_password, requires_pkce,
     google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret,
     jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `
 
 type CreateServiceParams struct {
@@ -43,6 +43,7 @@ type CreateServiceParams struct {
 	AuthMicrosoft         int64   `json:"auth_microsoft"`
 	AuthMagicLink         int64   `json:"auth_magic_link"`
 	AuthPassword          int64   `json:"auth_password"`
+	RequiresPkce          int64   `json:"requires_pkce"`
 	GoogleClientID        *string `json:"google_client_id"`
 	GoogleClientSecret    *string `json:"google_client_secret"`
 	MicrosoftClientID     *string `json:"microsoft_client_id"`
@@ -79,6 +80,7 @@ func (q *Queries) CreateService(ctx context.Context, arg CreateServiceParams) er
 		arg.AuthMicrosoft,
 		arg.AuthMagicLink,
 		arg.AuthPassword,
+		arg.RequiresPkce,
 		arg.GoogleClientID,
 		arg.GoogleClientSecret,
 		arg.MicrosoftClientID,
@@ -93,7 +95,7 @@ func (q *Queries) CreateService(ctx context.Context, arg CreateServiceParams) er
 }
 
 const getDefaultService = `-- name: GetDefaultService :one
-SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address FROM services WHERE is_default = 1 AND active = 1 LIMIT 1
+SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address, requires_pkce FROM services WHERE is_default = 1 AND active = 1 LIMIT 1
 `
 
 func (q *Queries) GetDefaultService(ctx context.Context) (Service, error) {
@@ -132,12 +134,13 @@ func (q *Queries) GetDefaultService(ctx context.Context) (Service, error) {
 		&i.Active,
 		&i.UpdatedAt,
 		&i.EmailFromAddress,
+		&i.RequiresPkce,
 	)
 	return i, err
 }
 
 const getServiceByAuthHost = `-- name: GetServiceByAuthHost :one
-SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address FROM services WHERE auth_host = ? AND active = 1 LIMIT 1
+SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address, requires_pkce FROM services WHERE auth_host = ? AND active = 1 LIMIT 1
 `
 
 func (q *Queries) GetServiceByAuthHost(ctx context.Context, authHost *string) (Service, error) {
@@ -176,12 +179,13 @@ func (q *Queries) GetServiceByAuthHost(ctx context.Context, authHost *string) (S
 		&i.Active,
 		&i.UpdatedAt,
 		&i.EmailFromAddress,
+		&i.RequiresPkce,
 	)
 	return i, err
 }
 
 const getServiceByID = `-- name: GetServiceByID :one
-SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address FROM services WHERE id = ? AND active = 1 LIMIT 1
+SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address, requires_pkce FROM services WHERE id = ? AND active = 1 LIMIT 1
 `
 
 func (q *Queries) GetServiceByID(ctx context.Context, id string) (Service, error) {
@@ -220,12 +224,13 @@ func (q *Queries) GetServiceByID(ctx context.Context, id string) (Service, error
 		&i.Active,
 		&i.UpdatedAt,
 		&i.EmailFromAddress,
+		&i.RequiresPkce,
 	)
 	return i, err
 }
 
 const listActiveServices = `-- name: ListActiveServices :many
-SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address FROM services WHERE active = 1 ORDER BY display_name
+SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address, requires_pkce FROM services WHERE active = 1 ORDER BY display_name
 `
 
 func (q *Queries) ListActiveServices(ctx context.Context) ([]Service, error) {
@@ -270,6 +275,7 @@ func (q *Queries) ListActiveServices(ctx context.Context) ([]Service, error) {
 			&i.Active,
 			&i.UpdatedAt,
 			&i.EmailFromAddress,
+			&i.RequiresPkce,
 		); err != nil {
 			return nil, err
 		}
@@ -285,7 +291,7 @@ func (q *Queries) ListActiveServices(ctx context.Context) ([]Service, error) {
 }
 
 const listAllServices = `-- name: ListAllServices :many
-SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address FROM services ORDER BY display_name
+SELECT id, display_name, tagline, domain, auth_host, callback_url, logo_html, bg_image, bg_css, theme, accent_color, email_from_name, auto_register, default_role, default_org, require_role, enforce_org, is_default, auth_google, auth_microsoft, auth_magic_link, auth_password, google_client_id, google_client_secret, microsoft_client_id, microsoft_client_secret, jwt_cookie_name, access_token_ttl, refresh_token_max_age, active, updated_at, email_from_address, requires_pkce FROM services ORDER BY display_name
 `
 
 func (q *Queries) ListAllServices(ctx context.Context) ([]Service, error) {
@@ -330,6 +336,7 @@ func (q *Queries) ListAllServices(ctx context.Context) ([]Service, error) {
 			&i.Active,
 			&i.UpdatedAt,
 			&i.EmailFromAddress,
+			&i.RequiresPkce,
 		); err != nil {
 			return nil, err
 		}
@@ -350,7 +357,7 @@ UPDATE services SET
     logo_html = ?, bg_image = ?, bg_css = ?, theme = ?, accent_color = ?,
     email_from_name = ?, email_from_address = ?, auto_register = ?, default_role = ?, default_org = ?,
     require_role = ?, enforce_org = ?, is_default = ?,
-    auth_google = ?, auth_microsoft = ?, auth_magic_link = ?, auth_password = ?,
+    auth_google = ?, auth_microsoft = ?, auth_magic_link = ?, auth_password = ?, requires_pkce = ?,
     google_client_id = ?, google_client_secret = ?,
     microsoft_client_id = ?, microsoft_client_secret = ?,
     jwt_cookie_name = ?, access_token_ttl = ?, refresh_token_max_age = ?,
@@ -381,6 +388,7 @@ type UpdateServiceParams struct {
 	AuthMicrosoft         int64   `json:"auth_microsoft"`
 	AuthMagicLink         int64   `json:"auth_magic_link"`
 	AuthPassword          int64   `json:"auth_password"`
+	RequiresPkce          int64   `json:"requires_pkce"`
 	GoogleClientID        *string `json:"google_client_id"`
 	GoogleClientSecret    *string `json:"google_client_secret"`
 	MicrosoftClientID     *string `json:"microsoft_client_id"`
@@ -417,6 +425,7 @@ func (q *Queries) UpdateService(ctx context.Context, arg UpdateServiceParams) er
 		arg.AuthMicrosoft,
 		arg.AuthMagicLink,
 		arg.AuthPassword,
+		arg.RequiresPkce,
 		arg.GoogleClientID,
 		arg.GoogleClientSecret,
 		arg.MicrosoftClientID,

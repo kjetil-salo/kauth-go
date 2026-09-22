@@ -91,6 +91,12 @@
             <label for="auth_password">Passord</label>
         </div>
 
+        <h2>OIDC (authorization_code + PKCE)</h2>
+        <div class="checkbox-row">
+            <input type="checkbox" id="requires_pkce" name="requires_pkce" value="1" {{if eq .Service.RequiresPkce 1}}checked{{end}}>
+            <label for="requires_pkce">Krev PKCE (offentlig OIDC-klient uten client secret, f.eks. en ekstern partner-app)</label>
+        </div>
+
         <h2>Branding</h2>
         <div class="form-group">
             <label>Avsendernavn (e-post)</label>

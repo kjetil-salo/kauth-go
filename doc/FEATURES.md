@@ -6,6 +6,7 @@ En komplett oversikt over hva kauth gjør og hvordan. README-en gir overordnet m
 
 - [Innloggingsmetoder](#innloggingsmetoder)
 - [Token-håndtering](#token-håndtering)
+- [OIDC authorization_code + PKCE](#oidc-authorization_code--pkce)
 - [Multi-tenant arkitektur](#multi-tenant-arkitektur)
 - [Admin-panel](#admin-panel)
 - [Sikkerhetsmekanismer](#sikkerhetsmekanismer)
@@ -74,6 +75,70 @@ Hvis et brukt refresh-token forsøkes brukt på nytt, slår kauth opp raden ubet
 - `services.access_token_ttl` — JWT-levetid
 - `services.refresh_token_max_age` — hardt tak på familielevetid (NULL = ubegrenset)
 - `family_expires_at` settes ved første utstedelse fra `max_age`, arves uendret ved hver rotasjon; klempes på `min(now+30d, family_expires_at)` ved utstedelse
+
+## OIDC authorization_code + PKCE
+
+Løser inn en klar mangel i den ellers OIDC-flavored bespoke flyten over:
+et standard OIDC-klientbibliotek (`oidc-client-ts`, `authlib` osv.) kan ikke
+brukes mot `/login`+`/dispatch` slik de fungerte alene — token kom tilbake
+direkte i URL-en, uten `aud`/`nonce`, uten en `code`-runde å bytte inn. Dette
+er nødvendig for en klient kauth ikke selv kontrollerer kildekoden til.
+
+### Forespørselen (`/login` som authorization_endpoint)
+
+En standard OIDC-forespørsel gjenkjennes på `response_type=code&client_id=...`.
+`client_id` er samme verdi som tjenestens `services.id` — det finnes ingen
+egen klient-tabell, en OIDC-klient ER en tjeneste. Ved en slik forespørsel:
+
+1. Tjenesten resolves på `client_id` (ikke `?service=` eller host-header)
+2. `redirect_uri` må matche tjenestens `callback_url`-allowlist eksakt
+   (samme `Registry.IsAllowedCallback` som Google-flyten bruker)
+3. Hvis tjenesten har `requires_pkce=1`: `code_challenge` og
+   `code_challenge_method=S256` er påkrevd, ellers avvises forespørselen med
+   400 FØR brukeren ser innloggingssiden
+4. Hele forespørselen (client_id, redirect_uri, state, nonce, scope,
+   code_challenge, code_challenge_method) lagres i en `oidc_authz`-cookie og
+   bæres videre gjennom resten av innloggingsreisen — magic link, Google,
+   Microsoft eller passord er alle uendret og ser ingenting av dette
+
+`requires_pkce` markerer en tjeneste som en **offentlig klient** uten
+client secret — riktig for en ekstern app uten egen backend (f.eks. en
+nettleser-widget). En konfidensiell klient med server-side secret er ikke
+implementert (ingen kjent bruksdata krever det per nå).
+
+### Autorisasjonskoder
+
+`authorization_codes`-tabellen speiler `magic_tokens`: kortlevd (60 sekunder
+— vesentlig kortere enn magic-link sine 15 minutter, siden koden kun skal
+leve fra `/dispatch`-redirect til klientens umiddelbare innløsning) og
+engangsbrukt (`used`-flagg, samme "konsumer atomisk"-mønster som
+`ConsumeMagicToken`). `/dispatch` genererer koden idet en `oidc_authz`-cookie
+er til stede (etter at brukeren har fullført innlogging via en av de vanlige
+metodene), og redirecter til `redirect_uri?code=&state=` — aldri med et
+token i klartekst i URL-en, i motsetning til den eksisterende bespoke flyten.
+
+### Innløsning (`POST /token`, `grant_type=authorization_code`)
+
+`/token` dispatcher nå på `grant_type` (tidligere behandlet enhver
+forespørsel som refresh). For `authorization_code`:
+
+1. Koden konsumeres atomisk (`ConsumeAuthorizationCode`) — ugyldig, brukt
+   eller utløpt kode gir generisk `invalid_grant`
+2. `client_id` og `redirect_uri` fra requesten må matche eksakt det koden
+   ble utstedt for (RFC 6749 §4.1.3) — hindrer at en kode avlyttet på ett
+   sted løses inn med en annen redirect_uri
+3. Hvis tjenesten krever PKCE: `code_verifier` hashes (SHA-256 → base64url)
+   og sammenlignes mot lagret `code_challenge` — kun `S256` støttes, `plain`
+   tilbys bevisst ikke (ingen reell beskyttelse)
+4. Ved suksess utstedes et ekte `id_token` (`Issuer.IssueIDToken`) i tillegg
+   til access- og refresh-token. `id_token` har `aud`=client_id og `nonce`
+   speilet fra requesten — begge mangler på det vanlige access-tokenet, som
+   aldri er ment å tolkes som identitetsbevis av en klient
+
+### Cleanup
+
+Utløpte autorisasjonskoder ryddes av samme bakgrunnsjobb-mønster som magic
+tokens og refresh tokens — se [Bakgrunnsjobber](#bakgrunnsjobber).
 
 ## Multi-tenant arkitektur
 
@@ -250,7 +315,7 @@ Alle stopper rent på `ctx.Done()` ved SIGTERM/SIGINT.
 
 | Metode | Sti | Beskrivelse |
 |---|---|---|
-| GET | `/login` | Login-side, valgfri `?service=<id>`, `?redirect_uri=<url>` og `?lang=<nb\|en\|de>` |
+| GET | `/login` | Login-side, valgfri `?service=<id>`, `?redirect_uri=<url>` og `?lang=<nb\|en\|de>` — fungerer også som `authorization_endpoint` for standard OIDC (`?response_type=code&client_id=...&code_challenge=...`) |
 | GET | `/login.html`, `/login-pov.html` | Legacy 301 → `/login` |
 | GET | `/oidc-login`, `/social-login` | Initier Google OAuth |
 | GET | `/callback` | Google OAuth callback |
@@ -260,7 +325,7 @@ Alle stopper rent på `ctx.Done()` ved SIGTERM/SIGINT.
 | POST | `/magic-login` | Send magic-link |
 | GET | `/magic-login/{token}` | Konsumer magic-token |
 | POST | `/do-login` | Passord-login (hvis aktivert) |
-| POST | `/token` | OAuth2 refresh-grant — CORS-aktivert |
+| POST | `/token` | `grant_type=refresh_token` eller `grant_type=authorization_code` (+ PKCE) — CORS-aktivert |
 | GET | `/dispatch` | Post-login dispatcher |
 | GET | `/logout` | Slett cookies, redirect |
 | GET | `/api/me` | JWT-introspection (returnerer claims som JSON) |
@@ -285,11 +350,11 @@ Alle stopper rent på `ctx.Done()` ved SIGTERM/SIGINT.
 
 ## Datamodell
 
-Fem SQLite-tabeller med WAL og foreign keys på:
+Seks SQLite-tabeller med WAL og foreign keys på:
 
 ### `services`
 
-Tjeneste-konfigurasjon. 30+ kolonner inkludert id, display_name, domain, auth_host, callback_url, branding (theme, accent_color, logo_html, bg_image, bg_css), auth-flagg (auth_google/microsoft/magic_link/password), OAuth-creds (per-service), TTL-er, default_role/org, is_default, active, updated_at.
+Tjeneste-konfigurasjon. 30+ kolonner inkludert id, display_name, domain, auth_host, callback_url, branding (theme, accent_color, logo_html, bg_image, bg_css), auth-flagg (auth_google/microsoft/magic_link/password), `requires_pkce` (offentlig OIDC-klient uten client secret), OAuth-creds (per-service), TTL-er, default_role/org, is_default, active, updated_at.
 
 ### `users`
 
@@ -306,6 +371,10 @@ Opake refresh-tokens med family-tracking: id, token_hash (sha256 hex, CHECK leng
 ### `audit_events`
 
 Hendelseslogg: id, event_type, auth_method, email, service_id, ip_address, user_agent, success, details, created_at.
+
+### `authorization_codes`
+
+Engangs-autorisasjonskoder for OIDC `authorization_code`-flyten: id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used.
 
 ## Drift og kjøremiljø
 

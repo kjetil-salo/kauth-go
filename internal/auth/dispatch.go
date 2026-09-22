@@ -5,7 +5,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/zral/kauth-go/internal/db/gen"
 	"github.com/zral/kauth-go/internal/service"
 	"github.com/zral/kauth-go/internal/token"
 )
@@ -14,7 +16,17 @@ import (
 type DispatchHandler struct {
 	Registry     *service.Registry
 	Issuer       *token.Issuer
+	Queries      *gen.Queries
 	DefaultSvcID string // ID til default-tjeneste for cookie-navn
+}
+
+// nullableStr returnerer nil for tom streng, ellers en peker til strengen —
+// for felter som er NULL-bare i databasen (sqlc emit_pointers_for_null_types).
+func nullableStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // readRedirectCookie leser og URL-dekoder redirect_uri-cookien.
@@ -74,6 +86,44 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		HttpOnly: true,
 		Secure:   os.Getenv("KAUTH_INSECURE_COOKIES") != "true",
 		SameSite: http.SameSiteLaxMode,
+	}
+
+	// Nivå 0: standard OIDC authorization_code-flyt. oidc_authz-cookien ble
+	// satt av LoginHandler.ServeLogin når forespørselen inneholdt
+	// response_type=code&client_id=... — redirect_uri og (ev.) PKCE-krav er
+	// allerede validert der. Her genereres selve koden og brukeren sendes
+	// til klientens redirect_uri med ?code=&state=, IKKE med et token i
+	// klartekst — koden løses inn på /token (grant_type=authorization_code).
+	if oidcReq, ok := ReadOIDCAuthorizeCookie(r); ok {
+		ClearOIDCAuthorizeCookie(w)
+		code, err := GenerateAuthorizationCode()
+		if err != nil {
+			http.Error(w, "intern feil", http.StatusInternalServerError)
+			return
+		}
+		expiresAt := time.Now().UTC().Add(60 * time.Second).Format("2006-01-02T15:04:05Z")
+		err = h.Queries.InsertAuthorizationCode(r.Context(), gen.InsertAuthorizationCodeParams{
+			Code:                code,
+			ServiceID:           oidcReq.ClientID,
+			Email:               claims.Email,
+			RedirectUri:         oidcReq.RedirectURI,
+			Scope:               nullableStr(oidcReq.Scope),
+			Nonce:               nullableStr(oidcReq.Nonce),
+			CodeChallenge:       nullableStr(oidcReq.CodeChallenge),
+			CodeChallengeMethod: nullableStr(oidcReq.CodeChallengeMethod),
+			CreatedAt:           time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+			ExpiresAt:           expiresAt,
+		})
+		if err != nil {
+			http.Error(w, "intern feil", http.StatusInternalServerError)
+			return
+		}
+		target := oidcReq.RedirectURI + "?code=" + url.QueryEscape(code)
+		if oidcReq.State != "" {
+			target += "&state=" + url.QueryEscape(oidcReq.State)
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
 	}
 
 	// Nivå 1: eksplisitt redirect_uri fra cookie

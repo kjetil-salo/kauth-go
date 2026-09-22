@@ -17,6 +17,7 @@ Kjører i prod på et knippe tjenester.
 - Utsteder JWT-er (RS256)
 - Roterer refresh-tokens med reuse-deteksjon (RFC OAuth-BCP §4.13)
 - Eksponerer JWKS og OpenID Discovery på `/.well-known/`
+- Snakker standard OIDC `authorization_code` + PKCE (RFC 6749 §4.1, RFC 7636) for tjenester merket `requires_pkce` — et ekte `id_token` med `aud`/`nonce`, slik at en ekstern klient du ikke kontrollerer koden til kan bruke et vanlig OIDC-bibliotek i stedet for den bespoke token-i-URL-flyten. Se [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
 - Tilbyr fire innloggingsveier per tjeneste: Google OIDC, Microsoft OIDC, magic-link på e-post, og passord (sistnevnte av som default — se *Det passordløse valget* nedenfor)
 - Sentral brukeradministrasjon: ett admin-panel for alle tjenestene
 - Auditlogg med 90 dagers retensjon, filtrerbar på alle kolonner og eksporterbar til CSV

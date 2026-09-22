@@ -22,14 +22,17 @@ func (c *Cleanup) Run(ctx context.Context) {
 	magicTicker := time.NewTicker(1 * time.Hour)
 	refreshTicker := time.NewTicker(1 * time.Hour)
 	auditTicker := time.NewTicker(1 * time.Hour)
+	authCodeTicker := time.NewTicker(1 * time.Hour)
 	defer magicTicker.Stop()
 	defer refreshTicker.Stop()
 	defer auditTicker.Stop()
+	defer authCodeTicker.Stop()
 
 	// Kjør alle cleanup-runder umiddelbart ved oppstart
 	c.cleanMagicTokens(ctx)
 	c.cleanRefreshTokens(ctx)
 	c.cleanAuditEvents(ctx)
+	c.cleanAuthorizationCodes(ctx)
 
 	for {
 		select {
@@ -42,6 +45,8 @@ func (c *Cleanup) Run(ctx context.Context) {
 			c.cleanRefreshTokens(ctx)
 		case <-auditTicker.C:
 			c.cleanAuditEvents(ctx)
+		case <-authCodeTicker.C:
+			c.cleanAuthorizationCodes(ctx)
 		}
 	}
 }
@@ -76,6 +81,22 @@ func (c *Cleanup) cleanRefreshTokens(ctx context.Context) {
 		return
 	}
 	log.Printf("cleanup: slettet utløpte refresh tokens (kjørt %s)", time.Now().UTC().Format("15:04:05"))
+}
+
+// cleanAuthorizationCodes sletter autorisasjonskoder — de er kortlevde (60s)
+// og engangsbrukte, så dette er ren opprydning, ikke en sikkerhetsmekanisme
+// i seg selv (used=1-koder er allerede ubrukelige, jf. ConsumeAuthorizationCode).
+func (c *Cleanup) cleanAuthorizationCodes(ctx context.Context) {
+	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	err := c.queries.DeleteExpiredAuthorizationCodes(ctx, gen.DeleteExpiredAuthorizationCodesParams{
+		ExpiresAt:   now,
+		ExpiresAt_2: now,
+	})
+	if err != nil {
+		log.Printf("cleanup: feil ved sletting av authorization codes: %v", err)
+		return
+	}
+	log.Printf("cleanup: slettet utløpte authorization codes (kjørt %s)", time.Now().UTC().Format("15:04:05"))
 }
 
 // cleanAuditEvents sletter audit-hendelser eldre enn 90 dager.

@@ -79,7 +79,7 @@ func main() {
 	googleH := auth.NewGoogleHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
 	msH := auth.NewMicrosoftHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
 	passwordH := auth.NewPasswordHandlers(queries, issuer, refreshSvc, registry, auditSvc)
-	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, DefaultSvcID: ""}
+	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, Queries: queries, DefaultSvcID: ""}
 	meH := &auth.MeHandler{Issuer: issuer, CookieName: "auth_token"}
 
 	// ── 8. Initialiser admin-handlers ────────────────────────────────────────
@@ -134,8 +134,8 @@ func main() {
 	r.Post("/magic-login", magicH.RequestLink)
 	r.Get("/magic-login/{token}", magicH.VerifyToken)
 
-	// ── Refresh token grant — CORS kun her ───────────────────────────────────
-	r.With(auth.CORSMiddleware(cfg.CORSOrigins)).Post("/token", passwordH.RefreshToken)
+	// ── Token-endepunkt: refresh_token + authorization_code — CORS kun her ───
+	r.With(auth.CORSMiddleware(cfg.CORSOrigins)).Post("/token", passwordH.Token)
 
 	// ── Post-login routing ────────────────────────────────────────────────────
 	r.Get("/dispatch", dispatchH.ServeDispatch)
