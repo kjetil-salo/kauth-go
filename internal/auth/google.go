@@ -186,11 +186,24 @@ func (h *GoogleHandlers) findOrCreate(ctx context.Context, email, name string, s
 	})
 }
 
+// csvHasExact sjekker om en kommaseparert streng inneholder value som et
+// eget felt — ikke som substring. "sysadmin" eller "admin-readonly" skal
+// IKKE matche kravet "admin"; kun et felt der hele trimmede verdien er
+// nøyaktig "admin" teller.
+func csvHasExact(csv, value string) bool {
+	for _, part := range strings.Split(csv, ",") {
+		if strings.TrimSpace(part) == value {
+			return true
+		}
+	}
+	return false
+}
+
 func checkPolicy(user gen.User, svc *gen.Service) error {
-	if svc.RequireRole != nil && *svc.RequireRole != "" && !strings.Contains(user.Roles, *svc.RequireRole) {
+	if svc.RequireRole != nil && *svc.RequireRole != "" && !csvHasExact(user.Roles, *svc.RequireRole) {
 		return fmt.Errorf("mangler rolle")
 	}
-	if svc.EnforceOrg == 1 && svc.DefaultOrg != nil && !strings.Contains(user.Orgs, *svc.DefaultOrg) {
+	if svc.EnforceOrg == 1 && svc.DefaultOrg != nil && !csvHasExact(user.Orgs, *svc.DefaultOrg) {
 		return fmt.Errorf("ikke autorisert")
 	}
 	return nil

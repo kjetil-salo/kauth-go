@@ -242,6 +242,17 @@ Cache invalideres ved Create/Update i admin-panelet.
 - `require_role` — tjenesten krever at brukeren har denne rollen i `roles` for å logge inn
 - `enforce_org` — krever at brukeren har `default_org` i `orgs`
 
+Håndheves av `checkPolicy` (`internal/auth/google.go`), kalt fra alle fire
+login-veiene (Google, Microsoft, magic-link, passord) samt fra
+`authorization_code`-grant i `/token`. Matcher CSV-feltet nøyaktig per felt
+(splittet på komma, ikke substring) — `require_role="admin"` godtar ikke en
+bruker med kun `sysadmin` i `roles`
+([issues/2](https://github.com/zral/kauth-go/issues/2)). Magic-link og
+passord kalte den ikke i det hele tatt før dette ble rettet
+([issues/3](https://github.com/zral/kauth-go/issues/3)) — funnet i
+kodegjennomgangen av PR #1, siden `require_role`/`enforce_org` inntil da kun
+var reelt håndhevet for Google/Microsoft-innlogging.
+
 ## Admin-panel
 
 Beskyttede ruter under `/admin/*` med separat `admin_token`-cookie (egen JWT med `token_use=admin`). Krever rollen `konge` i `users.roles`.

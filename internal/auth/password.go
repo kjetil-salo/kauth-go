@@ -57,6 +57,15 @@ func (h *PasswordHandlers) DoLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// require_role/enforce_org håndheves nå her — tidligere ble
+	// passord-login (i motsetning til Google/Microsoft) aldri sjekket mot
+	// disse (github.com/zral/kauth-go/issues/3).
+	if err := checkPolicy(user, svc); err != nil {
+		h.aud.Log(r.Context(), audit.Event{Type: "login_failed", AuthMethod: "password", Email: user.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false, Details: err.Error()})
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
 	at, err := h.issuer.IssueAccess(user, *svc)
 	if err != nil {
 		http.Error(w, "intern feil", http.StatusInternalServerError)
