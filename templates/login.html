@@ -131,7 +131,7 @@
         {{end}}
 
         {{if eq .Service.AuthGoogle 1}}
-        <a id="oidc-btn" href="/social-login" class="btn-social">
+        <a id="oidc-btn" href="/social-login?service={{.Service.ID}}" class="btn-social">
             <svg width="18" height="18" viewBox="0 0 48 48">
                 <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.2l6.7-6.7C35.8 2.5 30.3 0 24 0 14.7 0 6.7 5.4 2.8 13.3l7.8 6C12.4 13 17.8 9.5 24 9.5z"/>
                 <path fill="#4285F4" d="M46.6 24.5c0-1.6-.1-3.1-.4-4.5H24v8.5h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4 6.2-9.9 6.2-17z"/>
@@ -143,7 +143,7 @@
         {{end}}
 
         {{if eq .Service.AuthMicrosoft 1}}
-        <a id="ms-btn" href="/ms-oidc-login" class="btn-social">
+        <a id="ms-btn" href="/ms-oidc-login?service={{.Service.ID}}" class="btn-social">
             <svg width="18" height="18" viewBox="0 0 21 21">
                 <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
                 <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
@@ -202,15 +202,22 @@
     <script>
         (function() {
             var params = new URLSearchParams(location.search);
+            // En standard OIDC authorization request (response_type=code&client_id=...)
+            // bæres allerede videre av oidc_authz-cookien satt server-side i
+            // ServeLogin — se oidc_request.go. redirect_uri her er da klientens
+            // EGEN callback-URL, ikke et sted inne i kauth; skal den ikke limes
+            // inn i /social-login-knappen, ellers overstyres hele PKCE/code-
+            // flyten av den gamle enkle redirect_uri-cookie-mekanismen under.
+            if (params.get('response_type') === 'code' && params.get('client_id')) return;
             var redirectUri = params.get('redirect_uri');
             if (!redirectUri) return;
             document.cookie = 'redirect_uri=' + encodeURIComponent(redirectUri) +
                 '; path=/; max-age=600; Secure; SameSite=Lax';
             var enc = encodeURIComponent(redirectUri);
             var oidcBtn = document.getElementById('oidc-btn');
-            if (oidcBtn) oidcBtn.href = '/social-login?redirect_uri=' + enc;
+            if (oidcBtn) oidcBtn.href = oidcBtn.href + '&redirect_uri=' + enc;
             var msBtn = document.getElementById('ms-btn');
-            if (msBtn) msBtn.href = '/ms-oidc-login?redirect_uri=' + enc;
+            if (msBtn) msBtn.href = msBtn.href + '&redirect_uri=' + enc;
             var magicBtn = document.getElementById('magic-btn');
             if (magicBtn) magicBtn.href = magicBtn.href + '&redirect_uri=' + enc;
         })();

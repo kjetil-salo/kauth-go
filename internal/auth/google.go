@@ -52,7 +52,16 @@ func (h *GoogleHandlers) InitiateLogin(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	svc := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
+	// Eksplisitt service-param (nå alltid satt av login.html sin oidc-btn-lenke)
+	// må vinne over host-header-match — ellers kan en delt auth-host resolve
+	// til feil tjeneste, og dermed feil Google-credentials og feil svc.ID inn
+	// i /dispatch sin OIDC-kode-utstedelse (se dispatch.go Nivå 0).
+	host := r.Host
+	serviceID := r.URL.Query().Get("service")
+	if serviceID != "" {
+		host = ""
+	}
+	svc := h.reg.ResolveOrDefault(host, serviceID, "")
 	if svc.AuthGoogle != 1 {
 		http.Error(w, "Google-innlogging ikke aktivert", http.StatusForbidden)
 		return
@@ -96,7 +105,9 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "ugyldig HMAC", http.StatusBadRequest)
 		return
 	}
-	svc := h.reg.ResolveOrDefault(r.Host, svcID, "")
+	// svcID kommer fra signert state satt i InitiateLogin — alltid den
+	// riktige tjenesten. Host-header skal ikke kunne overstyre den her.
+	svc := h.reg.ResolveOrDefault("", svcID, "")
 	clientID, clientSecret := googleCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,

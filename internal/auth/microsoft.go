@@ -40,7 +40,14 @@ func NewMicrosoftHandlers(cfg config.Config, q *gen.Queries, iss *token.Issuer, 
 
 // InitiateLogin — GET /ms-oidc-login
 func (h *MicrosoftHandlers) InitiateLogin(w http.ResponseWriter, r *http.Request) {
-	svc := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
+	// Eksplisitt service-param (nå alltid satt av login.html sin ms-btn-lenke)
+	// må vinne over host-header-match — samme resonnement som google.go.
+	host := r.Host
+	serviceID := r.URL.Query().Get("service")
+	if serviceID != "" {
+		host = ""
+	}
+	svc := h.reg.ResolveOrDefault(host, serviceID, "")
 	if svc.AuthMicrosoft != 1 {
 		http.Error(w, "Microsoft-innlogging ikke aktivert", http.StatusForbidden)
 		return
@@ -87,7 +94,9 @@ func (h *MicrosoftHandlers) HandleCallback(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "ugyldig HMAC", http.StatusBadRequest)
 		return
 	}
-	svc := h.reg.ResolveOrDefault(r.Host, svcID, "")
+	// svcID kommer fra signert state satt i InitiateLogin — host-header skal
+	// ikke kunne overstyre den her.
+	svc := h.reg.ResolveOrDefault("", svcID, "")
 	clientID, clientSecret := msCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
