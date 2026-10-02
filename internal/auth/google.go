@@ -66,7 +66,7 @@ func (h *GoogleHandlers) InitiateLogin(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	svc := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
+	svc := resolveSocialService(h.reg, r)
 	h.redirectToGoogle(w, r, svc, false)
 }
 
@@ -132,7 +132,10 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	svcID, adminPurpose := claims.ServiceID, claims.Admin
-	svc := h.reg.ResolveOrDefault(r.Host, svcID, "")
+	// Tjenesten kommer fra den signerte staten satt i InitiateLogin. Host-headeren
+	// skal ikke kunne overstyre den, ellers ender en undertjeneste uten egen
+	// auth_host (delt host) opp som foreldretjenesten.
+	svc := h.reg.ResolveOrDefault("", svcID, "")
 	clientID, clientSecret := googleCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
