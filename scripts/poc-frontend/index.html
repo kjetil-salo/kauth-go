@@ -26,6 +26,15 @@
    — det er den eksakte, allerede registrerte <code>redirect_uri</code> for
    veivakt-tjenesten.</p>
 
+<p><strong>Viktig ved gjenbruk:</strong> hele runden er bundet til denne
+   ene nettleserøkten (verifier+state i <code>sessionStorage</code>, PKCE-
+   forespørselen i en <code>oidc_authz</code>-cookie satt av kauth). Åpne
+   IKKE magic-link-eposten i en annen nettleser/fane og forvent at den
+   fullfører her — den må åpnes i akkurat denne fanen. Å kjøre to runder
+   samtidig (f.eks. denne siden i to vinduer) bruker opp samme e-posts
+   rate-limit (3 lenker / 15 min) og gir forvirrende "utløpt/brukt"-feil.
+   Trykk "Kjør på nytt" og start fra bunnen ved tvil.</p>
+
 <div id="app"></div>
 
 <script>
