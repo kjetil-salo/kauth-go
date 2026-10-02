@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="nb">
+<head>
+<meta charset="utf-8">
+<title>Veivakt OIDC PoC — kauth-drivstoff</title>
+<style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; color: #0f172a; }
+    h1 { font-size: 1.3rem; }
+    button { font-size: 1rem; padding: .6rem 1.2rem; cursor: pointer; }
+    pre { background: #f1f5f9; padding: 1rem; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    .ok { color: #15803d; font-weight: 600; }
+    .err { color: #dc2626; font-weight: 600; }
+    .claim-ok { background: #dcfce7; }
+    .claim-bad { background: #fee2e2; }
+    table { border-collapse: collapse; margin-top: .5rem; }
+    td { padding: .2rem .6rem; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<h1>Veivakt → drivstoffprisene — OIDC-login PoC</h1>
+<p>Simulerer nøyaktig det Veivakt sin bil-widget gjør: en offentlig
+   (ingen client_secret) OIDC authorization_code+PKCE-klient mot
+   <code>auth.drivstoffprisene.no</code>, med <code>client_id=veivakt</code>.
+   Denne siden <strong>må</strong> kjøre på <code>http://localhost:5173/</code>
+   — det er den eksakte, allerede registrerte <code>redirect_uri</code> for
+   veivakt-tjenesten.</p>
+
+<div id="app"></div>
+
+<script>
+const BASE_URL = "https://auth.drivstoffprisene.no";
+const CLIENT_ID = "veivakt";
+const REDIRECT_URI = "http://localhost:5173/";
+
+function b64url(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sha256(str) {
+    return await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+}
+
+function decodeJwt(jwt) {
+    const payload = jwt.split('.')[1];
+    const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+    return JSON.parse(decodeURIComponent(escape(json)));
+}
+
+function renderClaims(title, claims) {
+    const rows = Object.entries(claims).map(([k, v]) => {
+        let cls = '';
+        if (k === 'aud') cls = JSON.stringify(v).includes(CLIENT_ID) ? 'claim-ok' : 'claim-bad';
+        if (k === 'token_use' && title.includes('id_token')) cls = v === 'id' ? 'claim-ok' : 'claim-bad';
+        return `<tr class="${cls}"><td>${k}</td><td>${JSON.stringify(v)}</td></tr>`;
+    }).join('');
+    return `<h3>${title}</h3><table>${rows}</table>`;
+}
+
+async function startLogin() {
+    const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+    const verifier = b64url(verifierBytes);
+    const challenge = b64url(await sha256(verifier));
+    const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+
+    sessionStorage.setItem('poc_verifier', verifier);
+    sessionStorage.setItem('poc_state', state);
+
+    const url = new URL(BASE_URL + '/login');
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('client_id', CLIENT_ID);
+    url.searchParams.set('redirect_uri', REDIRECT_URI);
+    url.searchParams.set('state', state);
+    url.searchParams.set('code_challenge', challenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+    url.searchParams.set('scope', 'openid email');
+    location.href = url.toString();
+}
+
+async function finishLogin(code, state) {
+    const app = document.getElementById('app');
+    const expectedState = sessionStorage.getItem('poc_state');
+    const verifier = sessionStorage.getItem('poc_verifier');
+
+    if (state !== expectedState) {
+        app.innerHTML = '<p class="err">state matcher ikke — avbryter (mulig CSRF eller gjenbrukt lenke).</p>';
+        return;
+    }
+    app.innerHTML = '<p>Fikk <code>?code=</code> tilbake fra kauth, state matcher. Bytter koden inn mot /token …</p>';
+
+    const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        code, redirect_uri: REDIRECT_URI, client_id: CLIENT_ID, code_verifier: verifier,
+    });
+
+    let resp, data;
+    try {
+        resp = await fetch(BASE_URL + '/token', { method: 'POST', body });
+        data = await resp.json();
+    } catch (e) {
+        app.innerHTML = `<p class="err">Fetch til /token feilet (sjekk CORS/nettverk): ${e}</p>`;
+        return;
+    }
+
+    if (!resp.ok) {
+        app.innerHTML = `<p class="err">/token svarte ${resp.status}:</p><pre>${JSON.stringify(data, null, 2)}</pre>`;
+        return;
+    }
+
+    sessionStorage.removeItem('poc_verifier');
+    sessionStorage.removeItem('poc_state');
+
+    const idClaims = decodeJwt(data.id_token);
+    const atClaims = decodeJwt(data.access_token);
+
+    app.innerHTML = `
+        <p class="ok">Innlogging fullført — ekte ?code=&state= → ekte id_token.</p>
+        ${renderClaims('id_token claims', idClaims)}
+        ${renderClaims('access_token claims', atClaims)}
+        <p><button onclick="history.replaceState({}, '', '${REDIRECT_URI}'); location.reload()">Kjør på nytt</button></p>
+    `;
+}
+
+(function init() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code');
+    const state = params.get('state');
+    const error = params.get('error');
+    const app = document.getElementById('app');
+
+    if (error) {
+        app.innerHTML = `<p class="err">kauth svarte med feil: ${error}</p>
+            <button onclick="startLogin()">Prøv igjen</button>`;
+    } else if (code) {
+        finishLogin(code, state);
+    } else {
+        app.innerHTML = `<button onclick="startLogin()">Logg inn med drivstoffprisene (som Veivakt)</button>`;
+    }
+})();
+</script>
+</body>
+</html>
