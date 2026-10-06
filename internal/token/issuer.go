@@ -22,6 +22,11 @@ type Claims struct {
 	Groups   []string `json:"groups"`
 	Name     string   `json:"name,omitempty"`
 	TokenUse string   `json:"token_use"`
+	// Scope speiles fra autorisasjonskoden (RFC 9068 §2.2.3) — en
+	// ressursserver kan da håndheve minste privilegium på selve tokenet, i
+	// stedet for å måtte anta at ethvert gyldig token får gjøre alt. Kun
+	// access-tokens; et id_token er identitetsbevis, ikke en fullmakt.
+	Scope string `json:"scope,omitempty"`
 	// Nonce speiles fra authorization-requesten (kun id_token, OIDC Core §2)
 	// — lar klienten koble et id_token til nettopp sin egen /authorize-runde
 	// og avvise et gjenbrukt/stjålet token fra en annen økt.
@@ -117,6 +122,19 @@ func splitCSV(s string) []string {
 	return out
 }
 
+// subject returnerer verdien som skal stå i sub: brukerens opake,
+// uforanderlige subject_id (migrasjon 008). Faller tilbake til e-post for en
+// rad som er satt inn utenom CreateUser og aldri har fått en — da er
+// oppførselen identisk med før migrasjonen, ikke dårligere. OIDC Core §2
+// krever at sub er lokalt unik og aldri gjenbrukt; e-post oppfyller ingen av
+// de to, og en konsument som lagrer sub mister koblingen ved e-postbytte.
+func subject(user gen.User) string {
+	if user.SubjectID != nil && *user.SubjectID != "" {
+		return *user.SubjectID
+	}
+	return user.Email
+}
+
 func (i *Issuer) buildClaims(user gen.User, ttl time.Duration, tokenUse string) Claims {
 	now := time.Now().UTC()
 	name := ""
@@ -126,7 +144,7 @@ func (i *Issuer) buildClaims(user gen.User, ttl time.Duration, tokenUse string) 
 	return Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    i.issuer,
-			Subject:   user.Email,
+			Subject:   subject(user),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
@@ -140,7 +158,22 @@ func (i *Issuer) buildClaims(user gen.User, ttl time.Duration, tokenUse string) 
 }
 
 func (i *Issuer) sign(claims Claims) (string, error) {
+	return i.signTyped(claims, "")
+}
+
+// signTyped signerer med en eksplisitt typ-header. Tom typ gir jwt-pakkens
+// standard ("JWT"). at+jwt (RFC 9068 §2.1) brukes kun på access-tokens
+// utstedt gjennom authorization_code-flyten, altså de som faktisk presenteres
+// for en ekstern ressursserver: headeren er der for at serveren skal kunne
+// avvise et id_token som ble forsøkt brukt som adgangstoken. De interne
+// tokenene (IssueAccess/IssueAdmin, bespoke dispatch-flyt) beholder "JWT",
+// siden ingen konsument validerer typ i dag og en endring der bare ville
+// vært risiko uten gevinst.
+func (i *Issuer) signTyped(claims Claims, typ string) (string, error) {
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	if typ != "" {
+		tok.Header["typ"] = typ
+	}
 	s, err := tok.SignedString(i.privateKey)
 	if err != nil {
 		return "", fmt.Errorf("signere JWT: %w", err)
@@ -158,19 +191,24 @@ func (i *Issuer) IssueAccess(user gen.User, svc gen.Service) (string, error) {
 	return i.sign(i.buildClaims(user, ttl, "access"))
 }
 
-// IssueAccessForAudience er IssueAccess, men med aud satt til den
-// oppgitte klienten. Brukt av authorization_code-grant: et access-token
-// utstedt til en ekstern klient bør bære en aud en ressursserver KAN
-// håndheve, i motsetning til det vanlige access-tokenet (utstedt til
-// tjenester vi selv kontrollerer, der aud historisk ikke har vært satt).
-func (i *Issuer) IssueAccessForAudience(user gen.User, svc gen.Service, aud string) (string, error) {
+// IssueAccessForAudience er IssueAccess, men med aud og scope satt. Brukt av
+// authorization_code-grant: et access-token utstedt til en ekstern klient bør
+// bære en aud en ressursserver KAN håndheve, i motsetning til det vanlige
+// access-tokenet (utstedt til tjenester vi selv kontrollerer, der aud
+// historisk ikke har vært satt).
+//
+// aud er ressursen klienten ba om (RFC 8707 resource indicator) når den
+// oppgav en, ellers client_id — se authorizationCodeGrant. scope speiles fra
+// autorisasjonskoden. Tokenet merkes at+jwt i headeren (RFC 9068).
+func (i *Issuer) IssueAccessForAudience(user gen.User, svc gen.Service, aud, scope string) (string, error) {
 	ttl := i.defaultTTL
 	if d, err := ParseISO8601Duration(svc.AccessTokenTtl); err == nil && d > 0 {
 		ttl = d
 	}
 	claims := i.buildClaims(user, ttl, "access")
 	claims.Audience = jwt.ClaimStrings{aud}
-	return i.sign(claims)
+	claims.Scope = scope
+	return i.signTyped(claims, "at+jwt")
 }
 
 // IssueWithTTL utsteder et access-token med eksplisitt TTL. Brukes bl.a. for negative TTL i tester.

@@ -13,7 +13,7 @@ const consumeAuthorizationCode = `-- name: ConsumeAuthorizationCode :one
 UPDATE authorization_codes
 SET used = 1
 WHERE code = ? AND used = 0 AND expires_at > ?
-RETURNING id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used
+RETURNING id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, resource
 `
 
 type ConsumeAuthorizationCodeParams struct {
@@ -37,6 +37,7 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.Used,
+		&i.Resource,
 	)
 	return i, err
 }
@@ -66,8 +67,8 @@ func (q *Queries) DeleteExpiredAuthorizationCodes(ctx context.Context, expiresAt
 }
 
 const insertAuthorizationCode = `-- name: InsertAuthorizationCode :exec
-INSERT INTO authorization_codes (code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO authorization_codes (code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, resource)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertAuthorizationCodeParams struct {
@@ -81,6 +82,7 @@ type InsertAuthorizationCodeParams struct {
 	CodeChallengeMethod string  `json:"code_challenge_method"`
 	CreatedAt           string  `json:"created_at"`
 	ExpiresAt           string  `json:"expires_at"`
+	Resource            *string `json:"resource"`
 }
 
 func (q *Queries) InsertAuthorizationCode(ctx context.Context, arg InsertAuthorizationCodeParams) error {
@@ -95,6 +97,7 @@ func (q *Queries) InsertAuthorizationCode(ctx context.Context, arg InsertAuthori
 		arg.CodeChallengeMethod,
 		arg.CreatedAt,
 		arg.ExpiresAt,
+		arg.Resource,
 	)
 	return err
 }

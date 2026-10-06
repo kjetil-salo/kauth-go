@@ -30,6 +30,7 @@ type AuthorizationCode struct {
 	CreatedAt           string  `json:"created_at"`
 	ExpiresAt           string  `json:"expires_at"`
 	Used                int64   `json:"used"`
+	Resource            *string `json:"resource"`
 }
 
 type MagicToken struct {
@@ -105,4 +106,5 @@ type User struct {
 	CreatedAt     string  `json:"created_at"`
 	LastLogin     *string `json:"last_login"`
 	DeactivatedAt *string `json:"deactivated_at"`
+	SubjectID     *string `json:"subject_id"`
 }

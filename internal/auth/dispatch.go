@@ -114,6 +114,13 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		// Cookien er usignert, så resource revalideres her — der den faktisk
+		// brukes — på samme måte som client_id og redirect_uri over. Uten
+		// dette kunne en håndlaget cookie plassert en vilkårlig streng i aud.
+		if !ValidResourceIndicator(oidcReq.Resource) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
 		code, err := GenerateAuthorizationCode()
 		if err != nil {
 			http.Error(w, "intern feil", http.StatusInternalServerError)
@@ -131,6 +138,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 			CodeChallengeMethod: oidcReq.CodeChallengeMethod,
 			CreatedAt:           time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 			ExpiresAt:           expiresAt,
+			Resource:            nullableStr(oidcReq.Resource),
 		})
 		if err != nil {
 			http.Error(w, "intern feil", http.StatusInternalServerError)

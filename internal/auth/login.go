@@ -102,6 +102,17 @@ func (h *LoginHandler) ServeLogin(w http.ResponseWriter, r *http.Request) {
 			redirectWithOIDCError(w, r, oidcReq.RedirectURI, "invalid_request", oidcReq.State)
 			return
 		}
+		// RFC 8707 §2: en ugyldig eller flerverdi resource-parameter
+		// rapporteres som invalid_target, ikke stilltiende ignorert. En
+		// klient som ber om et token for en bestemt ressursserver og i
+		// stedet får ett med aud=client_id, ville fått et token den tror
+		// er avgrenset og som ikke er det.
+		res, resOK := SingleResource(q)
+		if !resOK {
+			redirectWithOIDCError(w, r, oidcReq.RedirectURI, "invalid_target", oidcReq.State)
+			return
+		}
+		oidcReq.Resource = res
 		SetOIDCAuthorizeCookie(w, oidcReq)
 		serviceID = svc.ID
 		redirectURI = ""

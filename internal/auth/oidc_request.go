@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 )
 
 // OIDCAuthorizeRequest samler parameterne fra en standard OIDC authorization
@@ -28,6 +29,11 @@ type OIDCAuthorizeRequest struct {
 	Scope               string
 	CodeChallenge       string
 	CodeChallengeMethod string
+	// Resource er ressursindikatoren fra RFC 8707: hvilken ressursserver
+	// access-tokenet skal brukes mot. Settes som aud i stedet for client_id
+	// når den er oppgitt, slik at en ressursserver kan avvise et token som
+	// var ment for en annen mottaker. Tom = uendret oppførsel (aud=client_id).
+	Resource string
 }
 
 const oidcAuthzCookieName = "oidc_authz"
@@ -48,7 +54,48 @@ func ParseOIDCAuthorizeRequest(q url.Values) OIDCAuthorizeRequest {
 		Scope:               q.Get("scope"),
 		CodeChallenge:       q.Get("code_challenge"),
 		CodeChallengeMethod: q.Get("code_challenge_method"),
+		Resource:            q.Get("resource"),
 	}
+}
+
+// ValidResourceIndicator sjekker en resource-parameter mot RFC 8707 §2: en
+// absolutt URI UTEN fragment. Tom verdi er gyldig og betyr «ingen ressurs
+// oppgitt». En URN (urn:eksempel:ressurs) er tillatt av spec og godtas —
+// kravet om vert gjelder bare de hierarkiske skjemaene, der en URI uten vert
+// ikke peker på noe.
+//
+// Kravet er ikke formalisme: verdien ender opp som aud, altså det en
+// ressursserver sammenligner mot sin egen identitet. Kan to syntaktisk ulike
+// strenger bety samme ressurs (fragment, relativ URI), blir den
+// sammenligningen upålitelig.
+func ValidResourceIndicator(res string) bool {
+	if res == "" {
+		return true
+	}
+	u, err := url.Parse(res)
+	if err != nil {
+		return false
+	}
+	if !u.IsAbs() || u.Fragment != "" || strings.Contains(res, "#") {
+		return false
+	}
+	if u.Scheme == "http" || u.Scheme == "https" {
+		return u.Host != ""
+	}
+	return u.Opaque != "" || u.Host != "" || u.Path != ""
+}
+
+// SingleResource henter resource-parameteren og avviser flere forekomster.
+// RFC 8707 tillater at en klient ber om flere ressurser, men kauth utsteder
+// ett token med én aud — å godta to og stilltiende droppe den ene ville gitt
+// klienten et token den tror dekker mer enn det gjør.
+func SingleResource(q url.Values) (string, bool) {
+	vals := q["resource"]
+	if len(vals) > 1 {
+		return "", false
+	}
+	res := q.Get("resource")
+	return res, ValidResourceIndicator(res)
 }
 
 // SetOIDCAuthorizeCookie lagrer forespørselen i en kortlevd cookie som
@@ -63,6 +110,7 @@ func SetOIDCAuthorizeCookie(w http.ResponseWriter, req OIDCAuthorizeRequest) {
 	v.Set("scope", req.Scope)
 	v.Set("code_challenge", req.CodeChallenge)
 	v.Set("code_challenge_method", req.CodeChallengeMethod)
+	v.Set("resource", req.Resource)
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcAuthzCookieName,
@@ -98,6 +146,7 @@ func ReadOIDCAuthorizeCookie(r *http.Request) (OIDCAuthorizeRequest, bool) {
 		Scope:               v.Get("scope"),
 		CodeChallenge:       v.Get("code_challenge"),
 		CodeChallengeMethod: v.Get("code_challenge_method"),
+		Resource:            v.Get("resource"),
 	}
 	if req.ClientID == "" || req.RedirectURI == "" {
 		return OIDCAuthorizeRequest{}, false

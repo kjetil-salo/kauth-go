@@ -41,6 +41,12 @@
 const BASE_URL = "https://auth.drivstoffprisene.no";
 const CLIENT_ID = "veivakt";
 const REDIRECT_URI = "http://localhost:5173/";
+// Ressursindikatoren (RFC 8707) er drivstoffprisene selv — den ender opp som
+// aud i access-tokenet, altså det ressursserveren sammenligner mot sin egen
+// identitet før den godtar et delegert skriv.
+const RESOURCE = "https://drivstoffprisene.no";
+const SCOPE_IDENTITET = "openid email";
+const SCOPE_DELEGERT = "openid email priser:skriv";
 
 function b64url(buf) {
     return btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -51,23 +57,39 @@ async function sha256(str) {
     return await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
 }
 
-function decodeJwt(jwt) {
-    const payload = jwt.split('.')[1];
-    const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+function decodeJwtPart(jwt, index) {
+    const part = jwt.split('.')[index];
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/'));
     return JSON.parse(decodeURIComponent(escape(json)));
 }
 
-function renderClaims(title, claims) {
+function decodeJwt(jwt) { return decodeJwtPart(jwt, 1); }
+function decodeJwtHeader(jwt) { return decodeJwtPart(jwt, 0); }
+
+// Forventningene er ulike for de to tokenene, og det er hele poenget med
+// etappe 2: id_tokenet tilhører klienten (aud=client_id, OIDC Core §2),
+// access-tokenet tilhører ressursserveren (aud=resource, RFC 8707) og bærer
+// scope + typ=at+jwt (RFC 9068).
+function renderClaims(title, jwt, erIdToken, baOmRessurs) {
+    const claims = decodeJwt(jwt);
+    const header = decodeJwtHeader(jwt);
+    const forventetAud = erIdToken ? CLIENT_ID : (baOmRessurs ? RESOURCE : CLIENT_ID);
     const rows = Object.entries(claims).map(([k, v]) => {
         let cls = '';
-        if (k === 'aud') cls = JSON.stringify(v).includes(CLIENT_ID) ? 'claim-ok' : 'claim-bad';
-        if (k === 'token_use' && title.includes('id_token')) cls = v === 'id' ? 'claim-ok' : 'claim-bad';
+        if (k === 'aud') cls = JSON.stringify(v).includes(forventetAud) ? 'claim-ok' : 'claim-bad';
+        if (k === 'token_use') cls = v === (erIdToken ? 'id' : 'access') ? 'claim-ok' : 'claim-bad';
+        if (k === 'scope') cls = erIdToken ? 'claim-bad' : 'claim-ok';
+        if (k === 'sub') cls = String(v).includes('@') ? 'claim-bad' : 'claim-ok';
         return `<tr class="${cls}"><td>${k}</td><td>${JSON.stringify(v)}</td></tr>`;
     }).join('');
-    return `<h3>${title}</h3><table>${rows}</table>`;
+    const typCls = erIdToken
+        ? (header.typ === 'at+jwt' ? 'claim-bad' : 'claim-ok')
+        : (header.typ === 'at+jwt' ? 'claim-ok' : 'claim-bad');
+    const headerRow = `<tr class="${typCls}"><td>header.typ</td><td>${JSON.stringify(header.typ || null)}</td></tr>`;
+    return `<h3>${title}</h3><table>${headerRow}${rows}</table>`;
 }
 
-async function startLogin() {
+async function startLogin(baOmRessurs) {
     const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
     const verifier = b64url(verifierBytes);
     const challenge = b64url(await sha256(verifier));
@@ -75,6 +97,7 @@ async function startLogin() {
 
     sessionStorage.setItem('poc_verifier', verifier);
     sessionStorage.setItem('poc_state', state);
+    sessionStorage.setItem('poc_resource', baOmRessurs ? RESOURCE : '');
 
     const url = new URL(BASE_URL + '/login');
     url.searchParams.set('response_type', 'code');
@@ -83,7 +106,10 @@ async function startLogin() {
     url.searchParams.set('state', state);
     url.searchParams.set('code_challenge', challenge);
     url.searchParams.set('code_challenge_method', 'S256');
-    url.searchParams.set('scope', 'openid email');
+    url.searchParams.set('scope', baOmRessurs ? SCOPE_DELEGERT : SCOPE_IDENTITET);
+    if (baOmRessurs) {
+        url.searchParams.set('resource', RESOURCE);
+    }
     location.href = url.toString();
 }
 
@@ -98,10 +124,16 @@ async function finishLogin(code, state) {
     }
     app.innerHTML = '<p>Fikk <code>?code=</code> tilbake fra kauth, state matcher. Bytter koden inn mot /token …</p>';
 
+    const resource = sessionStorage.getItem('poc_resource') || '';
     const body = new URLSearchParams({
         grant_type: 'authorization_code',
         code, redirect_uri: REDIRECT_URI, client_id: CLIENT_ID, code_verifier: verifier,
     });
+    // Tas med når runden ba om en ressurs: /token sjekker da at den er
+    // identisk med kodens egen (RFC 8707 §2.2) og svarer invalid_target ellers.
+    if (resource) {
+        body.set('resource', resource);
+    }
 
     let resp, data;
     try {
@@ -119,14 +151,18 @@ async function finishLogin(code, state) {
 
     sessionStorage.removeItem('poc_verifier');
     sessionStorage.removeItem('poc_state');
+    sessionStorage.removeItem('poc_resource');
 
-    const idClaims = decodeJwt(data.id_token);
-    const atClaims = decodeJwt(data.access_token);
+    const baOmRessurs = !!resource;
+    const scopeLinje = data.scope
+        ? `<p>/token svarte med <code>scope: ${data.scope}</code></p>`
+        : '<p>/token svarte uten scope-felt</p>';
 
     app.innerHTML = `
         <p class="ok">Innlogging fullført — ekte ?code=&state= → ekte id_token.</p>
-        ${renderClaims('id_token claims', idClaims)}
-        ${renderClaims('access_token claims', atClaims)}
+        ${scopeLinje}
+        ${renderClaims('id_token', data.id_token, true, baOmRessurs)}
+        ${renderClaims('access_token', data.access_token, false, baOmRessurs)}
         <p><button onclick="history.replaceState({}, '', '${REDIRECT_URI}'); location.reload()">Kjør på nytt</button></p>
     `;
 }
@@ -140,11 +176,14 @@ async function finishLogin(code, state) {
 
     if (error) {
         app.innerHTML = `<p class="err">kauth svarte med feil: ${error}</p>
-            <button onclick="startLogin()">Prøv igjen</button>`;
+            <button onclick="startLogin(false)">Prøv igjen</button>`;
     } else if (code) {
         finishLogin(code, state);
     } else {
-        app.innerHTML = `<button onclick="startLogin()">Logg inn med drivstoffprisene (som Veivakt)</button>`;
+        app.innerHTML = `
+            <p><button onclick="startLogin(false)">Logg inn med drivstoffprisene (som Veivakt)</button></p>
+            <p><button onclick="startLogin(true)">Logg inn og be om delegert skrivetilgang
+               (<code>priser:skriv</code> mot <code>${RESOURCE}</code>)</button></p>`;
     }
 })();
 </script>

@@ -184,8 +184,29 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 	if row.Scope != nil {
 		scope = *row.Scope
 	}
+	resource := ""
+	if row.Resource != nil {
+		resource = *row.Resource
+	}
 
-	at, err := h.issuer.IssueAccessForAudience(user, *svc, clientID)
+	// RFC 8707 §2.2: sender klienten resource også i token-requesten, må den
+	// være blant dem autorisasjonsrunden gjaldt. Vi lagrer én, så det blir en
+	// likhetssjekk. Avgjørende at det er KODENS verdi som styrer aud, ikke
+	// formfeltet: ellers kunne den som fanget opp en kode selv bestemt hvilken
+	// ressursserver tokenet skulle gjelde for.
+	if want := r.FormValue("resource"); want != "" && want != resource {
+		writeTokenError(w, http.StatusBadRequest, "invalid_target")
+		return
+	}
+
+	// aud = ressursen klienten ba om, ellers client_id (uendret oppførsel for
+	// klienter som ikke bruker resource indicators).
+	aud := clientID
+	if resource != "" {
+		aud = resource
+	}
+
+	at, err := h.issuer.IssueAccessForAudience(user, *svc, aud, scope)
 	if err != nil {
 		http.Error(w, "intern feil", http.StatusInternalServerError)
 		return
@@ -207,6 +228,13 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		"refresh_token": rt,
 		"token_type":    "Bearer",
 		"expires_in":    int64(ttl.Seconds()),
+	}
+	// RFC 6749 §5.1: scope i svaret er påkrevd når det utstedte scopet avviker
+	// fra det klienten ba om, og tillatt ellers. Vi utsteder alltid det som ble
+	// autorisert, og tar det med uansett — en klient skal kunne lese hva den
+	// faktisk fikk uten å dekode access-tokenet.
+	if scope != "" {
+		resp["scope"] = scope
 	}
 	// id_token er en OIDC-ting (OIDC Core §3.1.3.3): utstedes kun når
 	// openid-scopet faktisk ble bedt om. En ren OAuth2-klient som aldri ba

@@ -21,9 +21,9 @@ func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 }
 
 const createUser = `-- name: CreateUser :one
-INSERT INTO users (email, password_hash, name, roles, orgs, created_at)
-VALUES (?, ?, ?, ?, ?, ?)
-RETURNING id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at
+INSERT INTO users (email, password_hash, name, roles, orgs, created_at, subject_id)
+VALUES (?, ?, ?, ?, ?, ?, lower(hex(randomblob(16))))
+RETURNING id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id
 `
 
 type CreateUserParams struct {
@@ -35,6 +35,15 @@ type CreateUserParams struct {
 	CreatedAt    string  `json:"created_at"`
 }
 
+// subject_id genereres i SQL, ikke i Go: det holder sub-genereringen paa ett
+// sted for alle fire innloggingsveiene (magic link, Google, Microsoft,
+// admin-opprettelse), og en femte vei kan ikke glemme den. Antall
+// plassholdere er uendret, saa CreateUserParams er urort.
+//
+// NB: ASCII-only med vilje. sqlc 1.31.1 slicer den raa SQL-teksten paa
+// byte-offset og kutter spoerringen naar en kommentar rett foran den
+// inneholder flerbyte-tegn -- samme bug som er dokumentert i
+// authorization_codes.sql.
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
 	row := q.db.QueryRowContext(ctx, createUser,
 		arg.Email,
@@ -55,6 +64,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.CreatedAt,
 		&i.LastLogin,
 		&i.DeactivatedAt,
+		&i.SubjectID,
 	)
 	return i, err
 }
@@ -74,7 +84,7 @@ func (q *Queries) DeactivateUser(ctx context.Context, arg DeactivateUserParams) 
 }
 
 const getActiveUserByEmail = `-- name: GetActiveUserByEmail :one
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users WHERE email = ? AND deactivated_at IS NULL LIMIT 1
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users WHERE email = ? AND deactivated_at IS NULL LIMIT 1
 `
 
 func (q *Queries) GetActiveUserByEmail(ctx context.Context, email string) (User, error) {
@@ -90,12 +100,13 @@ func (q *Queries) GetActiveUserByEmail(ctx context.Context, email string) (User,
 		&i.CreatedAt,
 		&i.LastLogin,
 		&i.DeactivatedAt,
+		&i.SubjectID,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users WHERE email = ? LIMIT 1
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users WHERE email = ? LIMIT 1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -111,12 +122,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.CreatedAt,
 		&i.LastLogin,
 		&i.DeactivatedAt,
+		&i.SubjectID,
 	)
 	return i, err
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users ORDER BY email LIMIT ? OFFSET ?
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users ORDER BY email LIMIT ? OFFSET ?
 `
 
 type ListUsersParams struct {
@@ -143,6 +155,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 			&i.CreatedAt,
 			&i.LastLogin,
 			&i.DeactivatedAt,
+			&i.SubjectID,
 		); err != nil {
 			return nil, err
 		}
@@ -158,7 +171,7 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 }
 
 const listUsersByOrg = `-- name: ListUsersByOrg :many
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users WHERE orgs LIKE ? ORDER BY email LIMIT ? OFFSET ?
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users WHERE orgs LIKE ? ORDER BY email LIMIT ? OFFSET ?
 `
 
 type ListUsersByOrgParams struct {
@@ -186,6 +199,7 @@ func (q *Queries) ListUsersByOrg(ctx context.Context, arg ListUsersByOrgParams) 
 			&i.CreatedAt,
 			&i.LastLogin,
 			&i.DeactivatedAt,
+			&i.SubjectID,
 		); err != nil {
 			return nil, err
 		}

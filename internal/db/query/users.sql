@@ -5,8 +5,17 @@ SELECT * FROM users WHERE email = ? LIMIT 1;
 SELECT * FROM users WHERE email = ? AND deactivated_at IS NULL LIMIT 1;
 
 -- name: CreateUser :one
-INSERT INTO users (email, password_hash, name, roles, orgs, created_at)
-VALUES (?, ?, ?, ?, ?, ?)
+-- subject_id genereres i SQL, ikke i Go: det holder sub-genereringen paa ett
+-- sted for alle fire innloggingsveiene (magic link, Google, Microsoft,
+-- admin-opprettelse), og en femte vei kan ikke glemme den. Antall
+-- plassholdere er uendret, saa CreateUserParams er urort.
+--
+-- NB: ASCII-only med vilje. sqlc 1.31.1 slicer den raa SQL-teksten paa
+-- byte-offset og kutter spoerringen naar en kommentar rett foran den
+-- inneholder flerbyte-tegn -- samme bug som er dokumentert i
+-- authorization_codes.sql.
+INSERT INTO users (email, password_hash, name, roles, orgs, created_at, subject_id)
+VALUES (?, ?, ?, ?, ?, ?, lower(hex(randomblob(16))))
 RETURNING *;
 
 -- name: UpdateUserLastLogin :exec

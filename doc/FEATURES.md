@@ -186,14 +186,76 @@ forespørsel som refresh). For `authorization_code`:
    URL-parameter). Dette er den reelle beskyttelsen mot tilgangsomgåelse,
    se forklaringen over
 6. Ved suksess utstedes access- og refresh-token, med access-tokenet utstedt
-   via `Issuer.IssueAccessForAudience` — `aud`=client_id, i motsetning til
-   det vanlige access-tokenet fra `IssueAccess` (utstedt til tjenester vi
-   selv kontrollerer, uten `aud`). Riktig for et token som nå kan havne hos
-   en ressursserver på en ekstern parts side
+   via `Issuer.IssueAccessForAudience` — `aud` = ressursen klienten ba om
+   (se Resource indicators under), ellers client_id, i motsetning til det
+   vanlige access-tokenet fra `IssueAccess` (utstedt til tjenester vi selv
+   kontrollerer, uten `aud`). Riktig for et token som nå kan havne hos en
+   ressursserver på en ekstern parts side. Tokenet bærer også `scope` fra
+   koden og merkes `typ: at+jwt` i JWT-headeren (RFC 9068 §2.1), slik at en
+   ressursserver kan avvise et `id_token` som forsøkes brukt som adgangstoken
 7. `id_token` (`Issuer.IssueIDToken`, `aud`=client_id, `nonce` speilet fra
    requesten) utstedes KUN hvis scope inneholder `openid` (OIDC Core
    §3.1.3.3) — en ren OAuth2-klient som aldri ba om `openid` skal ikke få et
    identitetstoken den ikke forventer
+
+### Resource indicators (RFC 8707)
+
+En klient kan oppgi `resource=<absolutt URI>` på `/login` for å si hvilken
+ressursserver access-tokenet skal brukes mot. Verdien lagres på
+autorisasjonskoden (`authorization_codes.resource`) og settes som `aud` på
+access-tokenet i stedet for client_id. `id_token` beholder alltid
+`aud`=client_id — de to tokenene har ulike mottakere, og OIDC Core §2 er
+tydelig på at identitetstokenet tilhører klienten.
+
+Hvorfor det er verdt en egen parameter: uten den må en ressursserver godta et
+token med `aud`=<klienten selv>, altså uten noe bevis på at tokenet var ment
+for nettopp den. Da kan et token klienten fikk for tjeneste A spilles av mot
+tjeneste B, og `aud`-sjekken blir en formalitet.
+
+Reglene:
+
+- Ugyldig verdi (relativ URI, eller fragment — RFC 8707 §2) gir
+  `?error=invalid_target` på klientens redirect_uri. En URN er gyldig.
+- Flere `resource`-parametre avvises med samme feil. kauth utsteder ett token
+  med én `aud`; å godta to og droppe den ene i stillhet ville gitt klienten et
+  token den tror dekker mer enn det gjør.
+- Sender klienten `resource` også til `/token`, må den være identisk med
+  kodens (RFC 8707 §2.2), ellers `invalid_target`. Det er alltid KODENS verdi
+  som styrer `aud` — ellers kunne den som fanget opp en kode selv valgt
+  hvilken ressursserver tokenet skulle gjelde for.
+- Ingen `resource` gir uendret oppførsel: `aud`=client_id.
+
+`scope` returneres også i `/token`-svaret (RFC 6749 §5.1) når det er satt, så
+en klient kan lese hva den fikk uten å dekode access-tokenet.
+
+`resource` og `scope` bæres i den usignerte `oidc_authz`-cookien og
+revalideres i `/dispatch` der koden utstedes, slik client_id og redirect_uri
+gjør — en håndlaget cookie kan derfor ikke plassere en vilkårlig streng i
+`aud`.
+
+**Kjent begrensning, verdt å kjenne før man stoler på `scope`:** kauth har
+ingen samtykkesteg og ingen per-klient liste over tillatte scopes, så en
+klient får det scopet den ber om. `scope` er dermed et uttrykk for hva
+klienten ba om, ikke en beslutning kauth har tatt — nyttig som
+minste-privilegium-markør og for logging, men ikke et bevis på at noen har
+godkjent nettopp den tilgangen. Det tokenet faktisk beviser, er at *denne*
+brukeren autentiserte seg og at koden ble utstedt til *denne* klienten; en
+klient kan ikke skaffe seg et token for en annen bruker. En ressursserver som
+vil ha samtykke som premiss må kreve det selv, eller kauth må få en
+per-klient scope-allowlist først.
+
+### sub er opak og uforanderlig
+
+`sub` er brukerens `users.subject_id` — 16 tilfeldige byte som hex, satt av
+`CreateUser` (migrasjon 008 backfyller eksisterende brukere). E-postadressen
+ligger fortsatt i sin egen `email`-claim.
+
+Tidligere var `sub` selve e-postadressen. OIDC Core §2 krever at `sub` er
+lokalt unik og aldri gjenbrukt, og e-post er ingen av de to: en konsument som
+knytter egne rader til `sub` mister koblingen når noen bytter adresse, og en
+gjenbrukt adresse arver forrige eiers historikk. En bruker uten `subject_id`
+(rad satt inn utenom `CreateUser`) faller tilbake til e-post, altså samme
+oppførsel som før migrasjonen.
 
 **Ressursserveres eget ansvar:** kauth setter nå `aud` på tokens utstedt via
 denne flyten, men om en intern ressursserver (minliste, bildegalleri,
