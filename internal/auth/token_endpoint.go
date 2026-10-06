@@ -110,10 +110,31 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 	if row.Scope != nil {
 		scope = *row.Scope
 	}
+	resource := ""
+	if row.Resource != nil {
+		resource = *row.Resource
+	}
+
+	// RFC 8707 §2.2: sender klienten resource også i token-requesten, må den
+	// være blant dem autorisasjonsrunden gjaldt. Vi lagrer én, så det blir en
+	// likhetssjekk. Avgjørende at det er KODENS verdi som styrer aud, ikke
+	// formfeltet: ellers kunne den som fanget opp en kode selv bestemt hvilken
+	// ressursserver tokenet skulle gjelde for.
+	if want := r.FormValue("resource"); want != "" && want != resource {
+		writeTokenError(w, http.StatusBadRequest, "invalid_target")
+		return
+	}
+
+	// aud = ressursen klienten ba om, ellers client_id (uendret oppførsel for
+	// klienter som ikke bruker resource indicators).
+	aud := clientID
+	if resource != "" {
+		aud = resource
+	}
 
 	// Tokens som kan feile signeres før koden konsumeres, slik at en intern
 	// feil ikke brenner koden.
-	at, err := h.issuer.IssueAccessForAudience(user, *svc, clientID)
+	at, err := h.issuer.IssueAccessForAudience(user, *svc, aud, scope)
 	if err != nil {
 		slog.Error("authorization_code: utstedelse av access-token feilet", "err", err)
 		writeTokenError(w, http.StatusInternalServerError, "server_error")
@@ -178,6 +199,13 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		"refresh_token": rt,
 		"token_type":    "Bearer",
 		"expires_in":    int64(ttl.Seconds()),
+	}
+	// RFC 6749 §5.1: scope i svaret er påkrevd når det utstedte scopet avviker
+	// fra det klienten ba om, og tillatt ellers. Vi utsteder alltid det som ble
+	// autorisert, og tar det med uansett — en klient skal kunne lese hva den
+	// faktisk fikk uten å dekode access-tokenet.
+	if scope != "" {
+		resp["scope"] = scope
 	}
 	if idToken != "" {
 		resp["id_token"] = idToken

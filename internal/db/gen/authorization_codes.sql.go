@@ -19,7 +19,7 @@ WHERE code = ?2
   AND code_challenge_method = 'S256'
   AND used = 0
   AND expires_at > ?6
-RETURNING id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, family_id
+RETURNING id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, family_id, resource
 `
 
 type ConsumeAuthorizationCodeCheckedParams struct {
@@ -55,6 +55,7 @@ func (q *Queries) ConsumeAuthorizationCodeChecked(ctx context.Context, arg Consu
 		&i.ExpiresAt,
 		&i.Used,
 		&i.FamilyID,
+		&i.Resource,
 	)
 	return i, err
 }
@@ -84,7 +85,7 @@ func (q *Queries) DeleteExpiredAuthorizationCodes(ctx context.Context, expiresAt
 }
 
 const getAuthorizationCodeByHash = `-- name: GetAuthorizationCodeByHash :one
-SELECT id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, family_id FROM authorization_codes WHERE code = ?1
+SELECT id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, family_id, resource FROM authorization_codes WHERE code = ?1
 `
 
 func (q *Queries) GetAuthorizationCodeByHash(ctx context.Context, codeHash string) (AuthorizationCode, error) {
@@ -104,13 +105,14 @@ func (q *Queries) GetAuthorizationCodeByHash(ctx context.Context, codeHash strin
 		&i.ExpiresAt,
 		&i.Used,
 		&i.FamilyID,
+		&i.Resource,
 	)
 	return i, err
 }
 
 const insertAuthorizationCode = `-- name: InsertAuthorizationCode :exec
-INSERT INTO authorization_codes (code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO authorization_codes (code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, resource)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertAuthorizationCodeParams struct {
@@ -124,6 +126,7 @@ type InsertAuthorizationCodeParams struct {
 	CodeChallengeMethod string  `json:"code_challenge_method"`
 	CreatedAt           string  `json:"created_at"`
 	ExpiresAt           string  `json:"expires_at"`
+	Resource            *string `json:"resource"`
 }
 
 func (q *Queries) InsertAuthorizationCode(ctx context.Context, arg InsertAuthorizationCodeParams) error {
@@ -138,6 +141,7 @@ func (q *Queries) InsertAuthorizationCode(ctx context.Context, arg InsertAuthori
 		arg.CodeChallengeMethod,
 		arg.CreatedAt,
 		arg.ExpiresAt,
+		arg.Resource,
 	)
 	return err
 }
