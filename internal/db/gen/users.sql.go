@@ -22,7 +22,7 @@ func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
 
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (email, password_hash, name, roles, orgs, created_at, subject_id)
-VALUES (?, ?, ?, ?, ?, ?, lower(hex(randomblob(16))))
+VALUES (lower(trim(?1)), ?2, ?3, ?4, ?5, ?6, lower(hex(randomblob(16))))
 RETURNING id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id
 `
 
@@ -84,7 +84,7 @@ func (q *Queries) DeactivateUser(ctx context.Context, arg DeactivateUserParams) 
 }
 
 const getActiveUserByEmail = `-- name: GetActiveUserByEmail :one
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users WHERE email = ? AND deactivated_at IS NULL LIMIT 1
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users WHERE lower(trim(email)) = lower(trim(?1)) AND deactivated_at IS NULL LIMIT 1
 `
 
 func (q *Queries) GetActiveUserByEmail(ctx context.Context, email string) (User, error) {
@@ -106,9 +106,22 @@ func (q *Queries) GetActiveUserByEmail(ctx context.Context, email string) (User,
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users WHERE email = ? LIMIT 1
+
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at, subject_id FROM users WHERE lower(trim(email)) = lower(trim(?1)) LIMIT 1
 `
 
+// Oppslag paa e-post normaliserer BEGGE sider: parameteren fordi den kommer
+// raa fra et skjemafelt eller en email-claim, og kolonnen fordi rader lagret
+// foer migrasjon 009 kan ha stor forbokstav. Uten dette opprettet
+// innloggingsveiene en ny konto -- nytt subject_id, dermed ny sub -- for en
+// bruker som tastet adressen sin med annen bokstavstoerrelse enn sist.
+//
+// Normaliseringen ligger i SQL og ikke i Go av samme grunn som subject_id i
+// CreateUser under: da kan ingen innloggingsvei (magic link, Google,
+// Microsoft, passord, admin) glemme den, og en sjette vei arver den gratis.
+//
+// sqlc.arg(email) er noedvendig for at parameteren fortsatt heter Email i Go;
+// uten den navngir sqlc den etter den ytterste SQL-funksjonen ("TRIM").
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
 	row := q.db.QueryRowContext(ctx, getUserByEmail, email)
 	var i User
@@ -236,7 +249,7 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) error {
 }
 
 const updateUserLastLogin = `-- name: UpdateUserLastLogin :exec
-UPDATE users SET last_login = ? WHERE email = ?
+UPDATE users SET last_login = ?1 WHERE lower(trim(email)) = lower(trim(?2))
 `
 
 type UpdateUserLastLoginParams struct {
