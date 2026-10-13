@@ -34,7 +34,7 @@ type AuthHandler struct {
 	cfg       *config.Config
 	loginTpl  *template.Template
 	verifyTpl *template.Template
-	sendWG    sync.WaitGroup // lar tester vente på asynkrone sendinger
+	sendWG    sync.WaitGroup // lar tester og shutdown vente på asynkrone sendinger
 }
 
 func NewAuthHandler(
@@ -430,3 +430,6 @@ func generateToken() (string, error) {
 func extractIP(r *http.Request) string {
 	return audit.ClientIP(r)
 }
+
+// WaitForSends venter til asynkrone e-postsendinger er ferdige (tester og shutdown).
+func (h *AuthHandler) WaitForSends() { h.sendWG.Wait() }

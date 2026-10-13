@@ -46,7 +46,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
-	defer sqlDB.Close()
 
 	// ── 3. Initialiser støttetjenester ──────────────────────────────────────
 	auditSvc := audit.NewService(queries)
@@ -214,18 +213,54 @@ func main() {
 		close(errCh)
 	}()
 
+	// Felles avslutning for signal og server-feil: sendinger, så audit, så DB.
+	drain := func() {
+		// Pågående magic-link-sendinger får en frist, ellers tapes de ved SIGTERM.
+		waitSends(5*time.Second, magicH.WaitForSends, adminAuthH.WaitForSends)
+		// Audit tømmes før databasen lukkes, ellers tapes køede hendelser.
+		auditCtx, auditCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer auditCancel()
+		if err := auditSvc.Close(auditCtx); err != nil {
+			log.Printf("audit: Close feilet: %v", err)
+		}
+		if err := sqlDB.Close(); err != nil {
+			log.Printf("database: lukking feilet: %v", err)
+		}
+	}
+
 	select {
 	case <-ctx.Done():
+		// Slipp signalhåndteringen, så et nytt SIGTERM/SIGINT avslutter umiddelbart.
+		stop()
 		log.Println("kauth: mottok avslutningssignal")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("graceful shutdown feilet: %v", err)
 		}
+		drain()
 		log.Println("kauth: avsluttet rent")
 	case err := <-errCh:
 		if err != nil {
-			log.Fatalf("server-feil: %v", err)
+			log.Printf("server-feil: %v", err)
+			drain()
+			os.Exit(1)
 		}
+	}
+}
+
+// waitSends venter på alle sendinger, men gir opp etter fristen.
+func waitSends(timeout time.Duration, waits ...func()) {
+	done := make(chan struct{})
+	go func() {
+		for _, w := range waits {
+			w()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Println("kauth: frist utløpt mens e-postsendinger pågikk")
 	}
 }
