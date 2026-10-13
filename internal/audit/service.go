@@ -4,7 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
-	"strings"
+	"net/http"
 	"time"
 
 	"github.com/zral/kauth-go/internal/db/gen"
@@ -67,19 +67,21 @@ func nullStr(s string) *string {
 	return &s
 }
 
-// ExtractIP henter klient-IP fra Cloudflare → X-Forwarded-For → RemoteAddr.
-// Kalles fra middleware og legges i context.
-func ExtractIP(cfIP, xff, remote string) string {
-	if cfIP != "" {
-		return cfIP
-	}
-	if xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		return strings.TrimSpace(parts[0])
-	}
-	host, _, err := net.SplitHostPort(remote)
+// ClientIP er den eneste funksjonen som avgjør klient-IP. cloudflared kobler til
+// fra loopback, så CF-Connecting-IP stoles på bare da; fra andre kilder kan
+// headeren forfalskes av klienten. X-Forwarded-For, X-Real-IP og
+// True-Client-IP leses aldri, siden de er trivielle å spoofe.
+func ClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return remote
+		host = r.RemoteAddr
+	}
+	if rip := net.ParseIP(host); rip != nil && rip.IsLoopback() {
+		if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+			if ip := net.ParseIP(cf); ip != nil {
+				return ip.String()
+			}
+		}
 	}
 	return host
 }

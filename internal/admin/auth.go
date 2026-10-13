@@ -342,11 +342,7 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// extractIP henter klient-IP fra Cloudflare → X-Forwarded-For → RemoteAddr.
+// extractIP delegerer til den felles IP-funksjonen slik at admin og auth aldri divergerer.
 func extractIP(r *http.Request) string {
-	return audit.ExtractIP(
-		r.Header.Get("CF-Connecting-IP"),
-		r.Header.Get("X-Forwarded-For"),
-		r.RemoteAddr,
-	)
+	return audit.ClientIP(r)
 }

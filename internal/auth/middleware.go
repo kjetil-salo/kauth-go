@@ -15,17 +15,17 @@ type contextKey string
 const clientIPKey contextKey = "clientIP"
 
 // ClientIPMiddleware henter klient-IP og legger den i context.
-// Leser CF-Connecting-IP → X-Forwarded-For → RemoteAddr via audit.ExtractIP.
+// Delegerer til audit.ClientIP, som er eneste sted IP-tillit avgjøres.
 func ClientIPMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := audit.ExtractIP(r.Header.Get("CF-Connecting-IP"), r.Header.Get("X-Forwarded-For"), r.RemoteAddr)
+		ip := audit.ClientIP(r)
 		ctx := context.WithValue(r.Context(), clientIPKey, ip)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 // ClientIP leser klient-IP fra context (satt av ClientIPMiddleware).
-// Returnerer tom streng dersom middleware ikke kjøres — akseptabelt frem til Task 10.
+// Returnerer tom streng dersom middleware ikke kjøres; alle ruter går gjennom UseGlobal.
 func ClientIP(r *http.Request) string {
 	if ip, ok := r.Context().Value(clientIPKey).(string); ok {
 		return ip

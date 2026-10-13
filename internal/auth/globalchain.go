@@ -12,7 +12,6 @@ import (
 func UseGlobal(r *chi.Mux, logger *slog.Logger) {
 	// Først, utenfor Recoverer, slik at også 500-svar får sikkerhetsheadere.
 	r.Use(SecurityHeaders)
-	r.Use(chimiddleware.RealIP)
 	r.Use(chimiddleware.Recoverer)
 	r.Use(ClientIPMiddleware)
 	// Etter ClientIPMiddleware (logger bruker ClientIP) og innenfor Recoverer
