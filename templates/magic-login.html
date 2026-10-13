@@ -4,10 +4,20 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.T.MagicPageTitle}} – {{.Service.DisplayName}}</title>
+    {{$isSpekto := or (eq .Service.ID "spekto") (eq .Service.ID "spekto-dev")}}
+    {{if $isSpekto}}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@700&display=swap" rel="stylesheet">
+    {{end}}
     <style>
         *, *::before, *::after { box-sizing: border-box; }
         body {
+            {{if $isSpekto}}
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            {{else}}
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            {{end}}
             margin: 0; min-height: 100vh;
             display: flex; align-items: center; justify-content: center;
             background: {{.BodyBgCSS}};
@@ -20,7 +30,9 @@
         }
         {{end}}
         .card {
-            {{if eq .Service.Theme "dark"}}
+            {{if $isSpekto}}
+            background: transparent; border-radius: 12px;
+            {{else if eq .Service.Theme "dark"}}
             background: transparent; border-radius: 16px;
             {{else}}
             background: rgba(255,255,255,.85); backdrop-filter: blur(8px); border-radius: 12px;
@@ -33,28 +45,42 @@
         }
         .logo-row svg { width: 36px; height: 36px; }
         .logo h1 {
+            {{if $isSpekto}}
+            font-family: 'Space Grotesk', 'DM Sans', sans-serif;
+            font-size: 1.6rem; font-weight: 700; margin: 0; letter-spacing: -.02em; color: #243d32;
+            {{else}}
             font-size: {{if eq .Service.Theme "dark"}}1.75rem{{else}}1.5rem{{end}};
             font-weight: {{if eq .Service.Theme "dark"}}800{{else}}700{{end}};
             margin: 0;
             {{if eq .Service.Theme "dark"}}color: #F4F4F5; letter-spacing: -.02em;{{else}}color: #0f172a;{{end}}
+            {{end}}
         }
         .logo p {
+            {{if $isSpekto}}
+            font-size: .9rem; margin: .4rem 0 0; color: #59685e; font-weight: 400;
+            {{else}}
             font-size: .85rem; margin: .25rem 0 0;
             {{if eq .Service.Theme "dark"}}color: #71717A; margin-top: .5rem;{{else}}color: #475569;{{end}}
+            {{end}}
         }
         input[type="email"] {
             display: block; width: 100%; padding: .7rem .85rem; margin-bottom: .75rem;
             font-size: .95rem;
-            {{if eq .Service.Theme "dark"}}
+            {{if $isSpekto}}
+            font-family: 'DM Sans', sans-serif;
+            border: 1px solid #d9ded2; border-radius: 10px; background: white; color: #243d32;
+            {{else if eq .Service.Theme "dark"}}
             border: 1px solid #3F3F46; border-radius: 8px; background: #18181B; color: #F4F4F5;
             {{else}}
             border: 1px solid #d1d5db; border-radius: 6px; background: white; color: #0f172a;
             {{end}}
         }
-        input::placeholder { {{if eq .Service.Theme "dark"}}color: #71717A;{{else}}color: #9ca3af;{{end}} }
+        input::placeholder { {{if $isSpekto}}color: #9aa89e;{{else if eq .Service.Theme "dark"}}color: #71717A;{{else}}color: #9ca3af;{{end}} }
         input:focus {
             outline: none;
-            {{if eq .Service.Theme "dark"}}
+            {{if $isSpekto}}
+            border-color: #a9432c; box-shadow: 0 0 0 3px rgba(169,67,44,.15);
+            {{else if eq .Service.Theme "dark"}}
             border-color: #818CF8; box-shadow: 0 0 0 3px rgba(129,140,248,.15);
             {{else}}
             border-color: #3b82f6; box-shadow: 0 0 0 3px rgba(59,130,246,.15);
@@ -62,21 +88,29 @@
         }
         .btn {
             width: 100%; padding: .75rem; border: none; font-size: .95rem;
-            cursor: pointer; font-weight: {{if eq .Service.Theme "dark"}}600{{else}}500{{end}};
-            {{if eq .Service.Theme "dark"}}
+            cursor: pointer;
+            {{if $isSpekto}}
+            font-family: 'DM Sans', sans-serif; font-weight: 700;
+            border-radius: 10px; background: #f47b64; color: #243329; transition: background .15s;
+            {{else if eq .Service.Theme "dark"}}
+            font-weight: 600;
             border-radius: 8px; background: #818CF8; color: white; transition: all .15s;
             {{else}}
+            font-weight: 500;
             border-radius: 6px; background: #1e40af; color: white;
             {{end}}
         }
-        .btn:hover { {{if eq .Service.Theme "dark"}}background: #6366F1;{{else}}background: #1e3a8a;{{end}} }
+        .btn:hover { {{if $isSpekto}}background: #f9917c;{{else if eq .Service.Theme "dark"}}background: #6366F1;{{else}}background: #1e3a8a;{{end}} }
         .btn:disabled { opacity: .5; cursor: not-allowed; }
         .msg {
-            padding: .6rem .75rem; border-radius: {{if eq .Service.Theme "dark"}}8px{{else}}6px{{end}};
+            padding: .6rem .75rem; border-radius: {{if $isSpekto}}10px{{else if eq .Service.Theme "dark"}}8px{{else}}6px{{end}};
             margin-bottom: 1rem; text-align: center; font-size: .9rem;
+            {{if $isSpekto}}font-family: 'DM Sans', sans-serif;{{end}}
         }
         .msg.error {
-            {{if eq .Service.Theme "dark"}}
+            {{if $isSpekto}}
+            color: #a9432c; background: #fbeae6; border: 1px solid #f0d3ca;
+            {{else if eq .Service.Theme "dark"}}
             color: #F87171; background: rgba(248,113,113,.1); border: 1px solid rgba(248,113,113,.2);
             {{else}}
             color: #dc2626; background: #fef2f2;
@@ -85,32 +119,39 @@
         .back {
             display: block; text-align: center; margin-top: 1.25rem;
             font-size: .9rem; text-decoration: none;
-            {{if eq .Service.Theme "dark"}}color: #71717A;{{else}}color: #475569;{{end}}
+            {{if $isSpekto}}color: #7c8a80; font-family: 'DM Sans', sans-serif;{{else if eq .Service.Theme "dark"}}color: #71717A;{{else}}color: #475569;{{end}}
         }
         .back:hover {
-            {{if eq .Service.Theme "dark"}}color: #A1A1AA;{{else}}color: #1e40af;{{end}}
+            {{if $isSpekto}}color: #a9432c;{{else if eq .Service.Theme "dark"}}color: #A1A1AA;{{else}}color: #1e40af;{{end}}
         }
         .confirm { display: none; text-align: center; }
         .confirm .icon { font-size: 2.5rem; margin-bottom: 1rem; }
         .confirm h2 {
+            {{if $isSpekto}}font-family: 'Space Grotesk', 'DM Sans', sans-serif;{{end}}
             font-size: 1.2rem; font-weight: 700; margin: 0 0 .5rem;
-            {{if eq .Service.Theme "dark"}}color: #F4F4F5;{{else}}color: #0f172a;{{end}}
+            {{if $isSpekto}}color: #243d32;{{else if eq .Service.Theme "dark"}}color: #F4F4F5;{{else}}color: #0f172a;{{end}}
         }
         .confirm p {
             font-size: .9rem; line-height: 1.5; margin: 0;
-            {{if eq .Service.Theme "dark"}}color: #A1A1AA;{{else}}color: #475569;{{end}}
+            {{if $isSpekto}}color: #59685e; font-family: 'DM Sans', sans-serif;{{else if eq .Service.Theme "dark"}}color: #A1A1AA;{{else}}color: #475569;{{end}}
         }
         .confirm .email-highlight {
-            {{if eq .Service.Theme "dark"}}color: #818CF8;{{else}}color: #1e40af;{{end}}
+            {{if $isSpekto}}color: #a9432c;{{else if eq .Service.Theme "dark"}}color: #818CF8;{{else}}color: #1e40af;{{end}}
             font-weight: 600;
         }
         .lang {
             position: absolute; left: 0; right: 0; top: 100%;
             margin-top: .75rem; text-align: center;
             font-size: .8rem; letter-spacing: .02em;
+            {{if $isSpekto}}font-family: 'DM Sans', sans-serif;{{end}}
         }
         .lang a, .lang span { text-decoration: none; padding: 0 .2rem; }
-        {{if eq .Service.Theme "dark"}}
+        {{if $isSpekto}}
+        .lang a { color: #7c8a80; }
+        .lang a:hover { color: #a9432c; }
+        .lang .active { color: #243d32; font-weight: 600; }
+        .lang .sep { color: #d9ded2; }
+        {{else if eq .Service.Theme "dark"}}
         .lang a { color: #71717A; }
         .lang a:hover { color: #A1A1AA; }
         .lang .active { color: #A1A1AA; font-weight: 600; }
@@ -160,7 +201,7 @@
             <p>{{.T.MagicSentToBefore}}
                 <span id="confirm-email" class="email-highlight"></span>{{.T.MagicSentToAfter}}</p>
             <p style="margin-top:.75rem;font-size:.8rem;
-                {{if eq .Service.Theme "dark"}}color:#71717A;{{else}}color:#6b7280;{{end}}">
+                {{if $isSpekto}}color:#7c8a80;font-family:'DM Sans', sans-serif;{{else if eq .Service.Theme "dark"}}color:#71717A;{{else}}color:#6b7280;{{end}}">
                 {{.T.MagicValidMinutes}}</p>
         </div>
 
