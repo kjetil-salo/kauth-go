@@ -49,6 +49,11 @@ func newConfirmFixture(t *testing.T) *confirmFixture {
 	mk("svcb", "Tjeneste Beta", "dark", 1, 1)
 	mk("inaktiv", "Tjeneste Inaktiv", "light", 1, 0)
 	mk("utenmagic", "Tjeneste Utenmagic", "light", 0, 1)
+	require.NoError(t, q.CreateService(ctx, gen.CreateServiceParams{
+		ID: "svcauto", DisplayName: "Tjeneste Auto", Domain: "svcauto.test", CallbackUrl: "https://svcauto.test/cb",
+		Theme: "light", AccentColor: "#000", EmailFromName: "Auto", AuthMagicLink: 1, AutoRegister: 1,
+		JwtCookieName: "auth_token", AccessTokenTtl: "PT15M", Active: 1, UpdatedAt: now,
+	}))
 	_, err = q.CreateUser(ctx, gen.CreateUserParams{Email: "bruker@example.com", Roles: "user", Orgs: "o", CreatedAt: now})
 	require.NoError(t, err)
 
@@ -191,6 +196,28 @@ func TestMagicRedeem_StoredServiceInactiveOrDisabled_Expired(t *testing.T) {
 		require.Contains(t, w.Header().Get("Location"), "error=expired", tok)
 		require.Empty(t, w.Result().Cookies(), tok)
 	}
+}
+
+// En deaktivert bruker på en tjeneste med auto-register ga 500 (eval 009-a):
+// auto-register kolliderte med den deaktiverte raden. Det skal være et avslag
+// uten tokens, og kontoen skal ikke gjenopprettes.
+func TestMagicRedeem_DeactivatedUserAutoRegister_AccessDenied(t *testing.T) {
+	f := newConfirmFixture(t)
+	_, err := f.sqldb.Exec("UPDATE users SET deactivated_at = ? WHERE email = 'bruker@example.com'", time.Now().UTC().Format(time.RFC3339))
+	require.NoError(t, err)
+	f.seed(t, "tok1", "svcauto", 15*time.Minute)
+
+	w := f.do(http.MethodPost, "/magic-login/tok1", sameOrigin)
+	require.Equal(t, http.StatusFound, w.Code)
+	require.Contains(t, w.Header().Get("Location"), "error=access_denied")
+	require.Empty(t, w.Result().Cookies())
+
+	var n int
+	require.NoError(t, f.sqldb.QueryRow("SELECT COUNT(*) FROM users WHERE lower(email) = 'bruker@example.com' AND deactivated_at IS NULL").Scan(&n))
+	require.Zero(t, n, "deaktivert konto skal ikke gjenopplives")
+	require.Eventually(t, func() bool {
+		return f.sqldb.QueryRow("SELECT COUNT(*) FROM audit_events WHERE event_type = 'login_failed' AND service_id = 'svcauto'").Scan(&n) == nil && n == 1
+	}, 2*time.Second, 20*time.Millisecond)
 }
 
 func TestMagicConfirmPost_SameOrigin_Consumes(t *testing.T) {

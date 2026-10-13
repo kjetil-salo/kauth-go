@@ -372,8 +372,13 @@ func (h *MagicHandlers) Redeem(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		})
 		if err != nil {
+			// Typisk en deaktivert konto med samme normaliserte e-post (unik
+			// indeks): GetActiveUserByEmail ser den ikke, og auto-register
+			// kolliderer. Det er et avslag, ikke en intern feil — og kontoen
+			// skal ikke kunne gjenopplives ved å logge inn på nytt.
 			slog.Error("magic-link: kunne ikke opprette bruker", "email", magic.Email, "service", svc.ID, "error", err)
-			http.Error(w, t.ErrInternal, http.StatusInternalServerError)
+			h.aud.Log(r.Context(), audit.Event{Type: "login_failed", AuthMethod: "magic_link", Email: magic.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false, Details: "reason=user_conflict (konto deaktivert eller kunne ikke opprettes)"})
+			h.redirectWithError(w, r, svc.ID, "access_denied", locale)
 			return
 		}
 	}
