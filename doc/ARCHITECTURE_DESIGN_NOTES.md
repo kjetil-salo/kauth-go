@@ -67,3 +67,5 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 - Aktive admin-sesjoner må logge inn på nytt én gang når `aud=kauth-admin` innføres.
 - Ingen nye kolonner. Klientenes tokens er uendret i Fase 0.
 - Fase 1 bygger videre med `aud` på alle tokens, avvisning av `service_id`-avvik, eventuelt håndheving av L4, og CSRF-vern som tar høyde for at `Referrer-Policy: no-referrer` gir `Origin: null` på skjema-POST.
+
+**Tillegg (2026-10-13, fra 007 F5):** Kauth sender `Referrer-Policy: no-referrer`. Derfor sender nettleseren `Origin: null` på kauths egne skjema-POST-er. CSRF-vern for admin og andre skjemaer (Fase 1) skal bruke `Sec-Fetch-Site: same-origin` eller et CSRF-token, ikke Origin. `Origin: null` skal aldri godtas. Origin-sjekken på `/token` (007 F7) påvirkes ikke, fordi den kalles fra appenes egne sider.

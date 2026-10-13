@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/zral/kauth-go/internal/admin"
 	"github.com/zral/kauth-go/internal/audit"
@@ -97,13 +96,7 @@ func main() {
 	// ── 10. Bygg Chi-router ───────────────────────────────────────────────────
 	r := chi.NewRouter()
 
-	// Global middleware
-	r.Use(chimiddleware.RealIP)
-	r.Use(chimiddleware.Recoverer)
-	r.Use(auth.ClientIPMiddleware)
-	// Etter ClientIPMiddleware (logger bruker ClientIP) og innenfor Recoverer
-	// (panikk gir fortsatt logglinje).
-	r.Use(auth.RequestLogger(slog.Default()))
+	auth.UseGlobal(r, slog.Default())
 
 	// Statiske filer
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
