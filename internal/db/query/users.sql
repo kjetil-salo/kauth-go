@@ -15,8 +15,8 @@ UPDATE users SET last_login = ? WHERE email = ?;
 -- name: UpdateUser :exec
 UPDATE users SET name = ?, roles = ?, orgs = ? WHERE id = ?;
 
--- name: DeactivateUser :exec
-UPDATE users SET deactivated_at = ? WHERE id = ?;
+-- name: DeactivateUser :one
+UPDATE users SET deactivated_at = ? WHERE id = ? RETURNING email;
 
 -- name: ListUsers :many
 SELECT * FROM users ORDER BY email LIMIT ? OFFSET ?;

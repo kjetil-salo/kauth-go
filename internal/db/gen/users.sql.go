@@ -59,8 +59,8 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
-const deactivateUser = `-- name: DeactivateUser :exec
-UPDATE users SET deactivated_at = ? WHERE id = ?
+const deactivateUser = `-- name: DeactivateUser :one
+UPDATE users SET deactivated_at = ? WHERE id = ? RETURNING email
 `
 
 type DeactivateUserParams struct {
@@ -68,9 +68,11 @@ type DeactivateUserParams struct {
 	ID            int64   `json:"id"`
 }
 
-func (q *Queries) DeactivateUser(ctx context.Context, arg DeactivateUserParams) error {
-	_, err := q.db.ExecContext(ctx, deactivateUser, arg.DeactivatedAt, arg.ID)
-	return err
+func (q *Queries) DeactivateUser(ctx context.Context, arg DeactivateUserParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, deactivateUser, arg.DeactivatedAt, arg.ID)
+	var email string
+	err := row.Scan(&email)
+	return email, err
 }
 
 const getActiveUserByEmail = `-- name: GetActiveUserByEmail :one

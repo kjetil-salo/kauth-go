@@ -50,7 +50,8 @@ func newAdminFlowFixture(t *testing.T) *adminFlowFixture {
 	mkUser("vanlig@example.com", "user")
 	mkUser("sysadmin@example.com", "sysadmin")
 	deact := mkUser("deaktivert@example.com", "konge")
-	require.NoError(t, q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: deact.ID}))
+	_, err = q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: deact.ID})
+	require.NoError(t, err)
 
 	svcs := []gen.Service{{
 		ID: "klarsyn", DisplayName: "Klarsyn", Domain: "klarsyn.net", IsDefault: 1,
