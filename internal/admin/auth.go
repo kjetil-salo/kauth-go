@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zral/kauth-go/internal/audit"
@@ -17,14 +19,20 @@ import (
 	"github.com/zral/kauth-go/internal/token"
 )
 
+// magicMailer lar tester telle sendinger uten SMTP.
+type magicMailer interface {
+	SendMagicLink(to, fromName, linkURL, locale, fromAddress string) error
+}
+
 // AuthHandler håndterer admin-innlogging via magic-token.
 type AuthHandler struct {
 	queries  *gen.Queries
 	issuer   *token.Issuer
-	mailer   *mail.Service
+	mailer   magicMailer
 	auditor  *audit.Service
 	cfg      *config.Config
 	loginTpl *template.Template
+	sendWG   sync.WaitGroup // lar tester vente på asynkrone sendinger
 }
 
 func NewAuthHandler(
@@ -103,7 +111,10 @@ func (h *AuthHandler) HandleLoginPost(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 	ctx := r.Context()
-	email := strings.TrimSpace(strings.ToLower(r.FormValue("email")))
+	email := token.NormalizeEmail(r.FormValue("email"))
+	if !token.ValidEmail(email) {
+		return nil
+	}
 
 	user, err := h.queries.GetActiveUserByEmail(ctx, email)
 	if err != nil {
@@ -137,17 +148,34 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 
 	now := time.Now().UTC()
 	expiresAt := now.Add(15 * time.Minute)
-	err = h.queries.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-		Token:       token.HashOpaque(rawToken),
+	if err := token.CheckMagicPurpose(token.MagicPurposeAdmin, nil); err != nil {
+		return err
+	}
+	// Kvoten (3 per 15 min) håndheves atomisk i selve INSERT-en, slik at den
+	// overlever restart og parallelle forespørsler. Ingen rad, ingen e-post.
+	n, err := h.queries.InsertMagicTokenLimited(ctx, gen.InsertMagicTokenLimitedParams{
+		TokenHash:   token.HashOpaque(rawToken),
 		Email:       email,
 		ServiceID:   nil,
 		RedirectUri: nil,
 		Purpose:     token.MagicPurposeAdmin,
 		CreatedAt:   now.Format("2006-01-02T15:04:05Z"),
 		ExpiresAt:   expiresAt.Format("2006-01-02T15:04:05Z"),
+		WindowStart: now.Add(-15 * time.Minute).Format("2006-01-02T15:04:05Z"),
 	})
 	if err != nil {
 		return err
+	}
+	if n != 1 {
+		h.auditor.Log(ctx, audit.Event{
+			Type:    "admin_magic_link_requested",
+			Email:   email,
+			IP:      extractIP(r),
+			UA:      r.UserAgent(),
+			Success: false,
+			Details: "kvote overskredet",
+		})
+		return nil
 	}
 
 	verifyURL := h.cfg.BaseURL + "/admin/verify?token=" + rawToken
@@ -155,9 +183,15 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 	// Admin-panelet er norsk-only, så e-posten sendes eksplisitt på norsk.
 	// Admin-panelet er ikke tjeneste-bundet, så det finnes ingen
 	// email_from_address å bruke — uendret global avsender (rå SMTP).
-	if sendErr := h.mailer.SendMagicLink(email, fromName, verifyURL, "nb", ""); sendErr != nil {
-		return sendErr
-	}
+	// Asynkront av samme grunn som i tjenesteflyten: SMTP-latens bare for
+	// konge-brukere ville avslørt hvem som er admin via responstiden.
+	h.sendWG.Add(1)
+	go func() {
+		defer h.sendWG.Done()
+		if sendErr := h.mailer.SendMagicLink(email, fromName, verifyURL, "nb", ""); sendErr != nil {
+			slog.Error("admin: kunne ikke sende magic-link", "error", sendErr)
+		}
+	}()
 
 	h.auditor.Log(ctx, audit.Event{
 		Type:    "admin_magic_link_requested",
@@ -165,6 +199,9 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 		IP:      extractIP(r),
 		UA:      r.UserAgent(),
 		Success: true,
+		// Sendingen er asynkron, så success betyr bare at lenken er lagret.
+		// Sendefeil står i journalen (slog.Error over).
+		Details: "lenke lagret",
 	})
 	return nil
 }

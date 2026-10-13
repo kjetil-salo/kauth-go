@@ -99,8 +99,8 @@ func TestMagicLinkVerify_RejectsUserWithoutRequiredRole(t *testing.T) {
 	require.NoError(t, err)
 
 	plainToken := "test-magic-token-12345"
-	require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-		Token: token.HashOpaque(plainToken), Purpose: token.MagicPurposeService, Email: user.Email, ServiceID: strPtrCP("restricted"),
+	require.NoError(t, seedMagic(ctx, q, gen.InsertMagicTokenLimitedParams{
+		TokenHash: token.HashOpaque(plainToken), Purpose: token.MagicPurposeService, Email: user.Email, ServiceID: strPtrCP("restricted"),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		ExpiresAt: time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339),
 	}))
@@ -174,4 +174,12 @@ func TestDoLogin_GlobalSwitchOffReturns403(t *testing.T) {
 	assert.Equal(t, http.StatusFound, on.Code, "bryter på: som før")
 	assert.Contains(t, on.Header().Get("Location"), "/dispatch?")
 	assert.NotEmpty(t, on.Result().Cookies(), "refresh-cookie settes")
+}
+
+// seedMagic setter inn en rad uten å gå via kvoten: vindusstart i fremtiden
+// gir alltid telling 0.
+func seedMagic(ctx context.Context, q *gen.Queries, p gen.InsertMagicTokenLimitedParams) error {
+	p.WindowStart = "9999"
+	_, err := q.InsertMagicTokenLimited(ctx, p)
+	return err
 }

@@ -55,6 +55,7 @@ func TestMagicToken_StoredAsHash(t *testing.T) {
 	oldOut := os.Stdout
 	os.Stdout = pw
 	h.RequestLink(httptest.NewRecorder(), req)
+	h.WaitForSends()
 	os.Stdout = oldOut
 	require.NoError(t, pw.Close())
 	out, _ := io.ReadAll(pr)

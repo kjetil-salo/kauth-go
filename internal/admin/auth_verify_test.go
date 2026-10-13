@@ -42,8 +42,8 @@ func newVerifyFixture(t *testing.T) (*AuthHandler, *gen.Queries, *token.Issuer) 
 func insertMagic(t *testing.T, q *gen.Queries, tok string, serviceID *string) {
 	t.Helper()
 	now := time.Now().UTC()
-	require.NoError(t, q.InsertMagicToken(context.Background(), gen.InsertMagicTokenParams{
-		Token: token.HashOpaque(tok), Purpose: purposeFor(serviceID), Email: "konge@example.com", ServiceID: serviceID,
+	require.NoError(t, seedMagic(context.Background(), q, gen.InsertMagicTokenLimitedParams{
+		TokenHash: token.HashOpaque(tok), Purpose: purposeFor(serviceID), Email: "konge@example.com", ServiceID: serviceID,
 		CreatedAt: now.Format("2006-01-02T15:04:05Z"),
 		ExpiresAt: now.Add(15 * time.Minute).Format("2006-01-02T15:04:05Z"),
 	}))
@@ -97,8 +97,8 @@ func TestHandleVerify_ServiceBoundTokenRejected(t *testing.T) {
 		purpose string
 		sid     *string
 	}{"admin-med-tjeneste": {token.MagicPurposeAdmin, &svc}, "service-uten-tjeneste": {token.MagicPurposeService, nil}} {
-		require.NoError(t, q.InsertMagicToken(context.Background(), gen.InsertMagicTokenParams{
-			Token: token.HashOpaque(tok), Purpose: row.purpose, Email: "konge@example.com", ServiceID: row.sid,
+		require.NoError(t, seedMagic(context.Background(), q, gen.InsertMagicTokenLimitedParams{
+			TokenHash: token.HashOpaque(tok), Purpose: row.purpose, Email: "konge@example.com", ServiceID: row.sid,
 			CreatedAt: now2.Format("2006-01-02T15:04:05Z"),
 			ExpiresAt: now2.Add(15 * time.Minute).Format("2006-01-02T15:04:05Z"),
 		}))
@@ -135,7 +135,7 @@ func TestAdminMagicToken_StoredAsHash(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/admin/login",
 		strings.NewReader(url.Values{"email": {"konge@example.com"}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	out := captureStdout(t, func() { require.NoError(t, h.tryIssueMagicLink(req)) })
+	out := captureStdout(t, func() { require.NoError(t, h.tryIssueMagicLink(req)); h.sendWG.Wait() })
 	m := regexp.MustCompile(`/admin/verify\?token=([0-9a-f]+)`).FindStringSubmatch(out)
 	require.NotNil(t, m, out)
 	plain := m[1]
@@ -166,4 +166,12 @@ func captureStdout(t *testing.T, fn func()) string {
 	require.NoError(t, pw.Close())
 	b, _ := io.ReadAll(pr)
 	return string(b)
+}
+
+// seedMagic setter inn en rad uten å gå via kvoten: vindusstart i fremtiden
+// gir alltid telling 0.
+func seedMagic(ctx context.Context, q *gen.Queries, p gen.InsertMagicTokenLimitedParams) error {
+	p.WindowStart = "9999"
+	_, err := q.InsertMagicTokenLimited(ctx, p)
+	return err
 }

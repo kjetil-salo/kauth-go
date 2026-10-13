@@ -43,8 +43,8 @@ func TestMagicVerifyToken_PurposeBinding(t *testing.T) {
 
 	svcID := "klarsyn"
 	for tok, sid := range map[string]*string{"tjeneste-tok": &svcID, "admin-tok": nil} {
-		require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-			Token: token.HashOpaque(tok), Purpose: purposeFor(sid), Email: "konge@example.com", ServiceID: sid,
+		require.NoError(t, seedMagic(ctx, q, gen.InsertMagicTokenLimitedParams{
+			TokenHash: token.HashOpaque(tok), Purpose: purposeFor(sid), Email: "konge@example.com", ServiceID: sid,
 			CreatedAt: nowStr, ExpiresAt: now.Add(15 * time.Minute).Format(time.RFC3339),
 		}))
 	}
@@ -56,8 +56,8 @@ func TestMagicVerifyToken_PurposeBinding(t *testing.T) {
 		purpose string
 		sid     *string
 	}{"service-uten-tjeneste": {token.MagicPurposeService, nil}, "admin-med-tjeneste": {token.MagicPurposeAdmin, &svcID}} {
-		require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-			Token: token.HashOpaque(tok), Purpose: row.purpose, Email: "konge@example.com", ServiceID: row.sid,
+		require.NoError(t, seedMagic(ctx, q, gen.InsertMagicTokenLimitedParams{
+			TokenHash: token.HashOpaque(tok), Purpose: row.purpose, Email: "konge@example.com", ServiceID: row.sid,
 			CreatedAt: nowStr, ExpiresAt: now.Add(15 * time.Minute).Format(time.RFC3339),
 		}))
 	}

@@ -1,7 +1,3 @@
--- name: InsertMagicToken :exec
-INSERT INTO magic_tokens (token, email, service_id, redirect_uri, purpose, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?);
-
 -- name: InsertMagicTokenLimited :execrows
 INSERT INTO magic_tokens (token, email, service_id, redirect_uri, purpose, created_at, expires_at)
 SELECT CAST(sqlc.arg(token_hash) AS TEXT), CAST(sqlc.arg(email) AS TEXT), sqlc.narg(service_id), sqlc.narg(redirect_uri), CAST(sqlc.arg(purpose) AS TEXT), CAST(sqlc.arg(created_at) AS TEXT), CAST(sqlc.arg(expires_at) AS TEXT)

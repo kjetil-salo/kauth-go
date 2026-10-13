@@ -83,34 +83,6 @@ func (q *Queries) GetValidMagicTokenByHash(ctx context.Context, arg GetValidMagi
 	return i, err
 }
 
-const insertMagicToken = `-- name: InsertMagicToken :exec
-INSERT INTO magic_tokens (token, email, service_id, redirect_uri, purpose, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-`
-
-type InsertMagicTokenParams struct {
-	Token       string  `json:"token"`
-	Email       string  `json:"email"`
-	ServiceID   *string `json:"service_id"`
-	RedirectUri *string `json:"redirect_uri"`
-	Purpose     string  `json:"purpose"`
-	CreatedAt   string  `json:"created_at"`
-	ExpiresAt   string  `json:"expires_at"`
-}
-
-func (q *Queries) InsertMagicToken(ctx context.Context, arg InsertMagicTokenParams) error {
-	_, err := q.db.ExecContext(ctx, insertMagicToken,
-		arg.Token,
-		arg.Email,
-		arg.ServiceID,
-		arg.RedirectUri,
-		arg.Purpose,
-		arg.CreatedAt,
-		arg.ExpiresAt,
-	)
-	return err
-}
-
 const insertMagicTokenLimited = `-- name: InsertMagicTokenLimited :execrows
 INSERT INTO magic_tokens (token, email, service_id, redirect_uri, purpose, created_at, expires_at)
 SELECT CAST(?1 AS TEXT), CAST(?2 AS TEXT), ?3, ?4, CAST(?5 AS TEXT), CAST(?6 AS TEXT), CAST(?7 AS TEXT)

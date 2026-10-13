@@ -30,8 +30,8 @@ func TestMagicTokenQueries_PurposeInWhere(t *testing.T) {
 		sid           *string
 	}{{"h-admin", "admin", nil}, {"h-service", "service", &sid}}
 	for _, r := range rows {
-		require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-			Token: r.hash, Email: "a@x.no", ServiceID: r.sid, Purpose: r.purpose, CreatedAt: now, ExpiresAt: exp,
+		require.NoError(t, seedMagic(ctx, q, gen.InsertMagicTokenLimitedParams{
+			TokenHash: r.hash, Email: "a@x.no", ServiceID: r.sid, Purpose: r.purpose, CreatedAt: now, ExpiresAt: exp,
 		}))
 	}
 	other := map[string]string{"admin": "service", "service": "admin"}
@@ -57,4 +57,12 @@ func generatedQuery(t *testing.T, file, constName string) string {
 	m := regexp.MustCompile("(?s)const " + constName + " = `-- name: [^\n]*\n(.*?)`").FindStringSubmatch(string(b))
 	require.NotNil(t, m, constName)
 	return regexp.MustCompile(`\?\d+`).ReplaceAllString(strings.TrimSpace(m[1]), "?")
+}
+
+// seedMagic setter inn en rad uten å gå via kvoten: vindusstart i fremtiden
+// gir alltid telling 0.
+func seedMagic(ctx context.Context, q *gen.Queries, p gen.InsertMagicTokenLimitedParams) error {
+	p.WindowStart = "9999"
+	_, err := q.InsertMagicTokenLimited(ctx, p)
+	return err
 }

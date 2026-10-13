@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"html/template"
@@ -20,59 +21,34 @@ import (
 	"github.com/zral/kauth-go/internal/token"
 )
 
-// --- Rate limiter ---
-
-type rateLimiterEntry struct {
-	count     int
-	windowEnd time.Time
-}
-
-type RateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*rateLimiterEntry
-	limit   int
-	window  time.Duration
-}
-
-func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
-	return &RateLimiter{entries: make(map[string]*rateLimiterEntry), limit: limit, window: window}
-}
-
-func (rl *RateLimiter) Allow(email string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	now := time.Now()
-	e, ok := rl.entries[email]
-	if !ok || now.After(e.windowEnd) {
-		rl.entries[email] = &rateLimiterEntry{count: 1, windowEnd: now.Add(rl.window)}
-		return true
-	}
-	if e.count >= rl.limit {
-		return false
-	}
-	e.count++
-	return true
-}
-
 // --- Magic handlers ---
+
+// magicMailer lar tester telle sendinger uten å fange stdout.
+type magicMailer interface {
+	SendMagicLink(to, fromName, linkURL, locale, fromAddress string) error
+}
 
 type MagicHandlers struct {
 	cfg     config.Config
 	queries *gen.Queries
-	mailer  *mail.Service
+	mailer  magicMailer
 	issuer  *token.Issuer
 	refresh *token.RefreshService
 	reg     *service.Registry
 	aud     *audit.Service
-	rl      *RateLimiter
+	sendWG  sync.WaitGroup // lar tester vente på asynkrone sendinger
 	tmpl    *template.Template
 }
 
 func NewMagicHandlers(cfg config.Config, q *gen.Queries, m *mail.Service, iss *token.Issuer,
 	ref *token.RefreshService, reg *service.Registry, aud *audit.Service, tmpl *template.Template) *MagicHandlers {
 	return &MagicHandlers{cfg: cfg, queries: q, mailer: m, issuer: iss, refresh: ref,
-		reg: reg, aud: aud, rl: NewRateLimiter(3, 15*time.Minute), tmpl: tmpl}
+		reg: reg, aud: aud, tmpl: tmpl}
 }
+
+// WaitForSends venter til asynkrone e-postsendinger er ferdige (tester og
+// kontrollert nedstenging).
+func (h *MagicHandlers) WaitForSends() { h.sendWG.Wait() }
 
 // ShowForm — GET /magic-login
 func (h *MagicHandlers) ShowForm(w http.ResponseWriter, r *http.Request) {
@@ -137,19 +113,15 @@ func (h *MagicHandlers) RequestLink(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	// Locale leses fra POST-URL-en; magic-login.html legger ?lang= på fetch-kallet.
 	locale := i18n.FromRequest(r)
-	email := r.FormValue("email")
+	// Kvoten telles per normalisert adresse, ellers omgås den med store bokstaver
+	// eller mellomrom.
+	email := NormalizeEmail(r.FormValue("email"))
 	// Leser "service" (ny template) med fallback til "service_id" (gammel form)
 	serviceID := r.FormValue("service")
 	if serviceID == "" {
 		serviceID = r.FormValue("service_id")
 	}
 	svc := h.reg.ResolveOrDefault(r.Host, serviceID, "")
-
-	if !h.rl.Allow(email) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("sjekk e-post"))
-		return
-	}
 
 	b := make([]byte, 32)
 	if _, err := randRead(b); err != nil {
@@ -160,44 +132,71 @@ func (h *MagicHandlers) RequestLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plainToken := hex.EncodeToString(b)
-	now := time.Now().UTC()
 
-	// BACKLOG F1 K4: redirect_uri ble tidligere lest fra query-param her, men
-	// magic-login.html sin fetch() sender aldri det feltet (kun email+service) —
-	// verdien var derfor alltid nil i praksis, og RedirectUri leses ikke andre
-	// steder i kodebasen (verifisert). Fjernet i stedet for å late som den brukes;
-	// selve redirect-etter-innlogging dekkes av redirect_uri-cookien satt
-	// klientside i login.html (samme mekanisme som Google/Microsoft-flyten).
-	if err := h.queries.InsertMagicToken(r.Context(), gen.InsertMagicTokenParams{
-		Token:       token.HashOpaque(plainToken),
-		Email:       email,
-		ServiceID:   &serviceID,
-		RedirectUri: nil,
-		Purpose:     token.MagicPurposeService,
-		ExpiresAt:   now.Add(15 * time.Minute).Format(time.RFC3339),
-		CreatedAt:   now.Format(time.RFC3339),
-	}); err != nil {
-		slog.Error("magic-link: kunne ikke lagre token", "email", email, "error", err)
-		// Anti-enumeration: same response regardless
-	}
-
-	fromName := svc.EmailFromName
-	var fromAddress string
-	if svc.EmailFromAddress != nil {
-		fromAddress = *svc.EmailFromAddress
-	}
-	baseURL := resolveMagicLinkBaseURL(h.cfg, svc)
-	// lang følger med i lenken slik at et eksplisitt språkvalg overlever turen
-	// via e-postklienten — nettleseren som åpner lenken kan ha en annen
-	// Accept-Language enn den brukeren valgte på login-siden.
-	link := baseURL + "/magic-login/" + plainToken + "?service=" + serviceID + "&lang=" + locale
-	if err := h.mailer.SendMagicLink(email, fromName, link, locale, fromAddress); err != nil {
-		slog.Error("magic-link: kunne ikke sende e-post", "email", email, "error", err)
-		// Anti-enumeration: same response regardless
+	// Alle grener under svarer likt: avslått metode, kvote, lagringsfeil og
+	// suksess skal ikke kunne skilles utenfra (anti-enumeration).
+	if h.storeToken(r.Context(), svc, email, plainToken) {
+		fromName := svc.EmailFromName
+		var fromAddress string
+		if svc.EmailFromAddress != nil {
+			fromAddress = *svc.EmailFromAddress
+		}
+		// lang følger med i lenken slik at et eksplisitt språkvalg overlever turen
+		// via e-postklienten. Verdiene kodes fordi tjeneste-ID kommer fra
+		// skjemaet/DB og ellers kan sprenge query-strengen (&, #).
+		q := url.Values{}
+		q.Set("service", svc.ID)
+		q.Set("lang", locale)
+		link := resolveMagicLinkBaseURL(h.cfg, svc) + "/magic-login/" + plainToken + "?" + q.Encode()
+		// Sendes asynkront: SMTP-latens bare i suksessgrenen ville ellers skilt
+		// «adressen fikk lenke» fra de andre grenene (timing-enumeration). Raden er
+		// allerede lagret. Mail-laget tar ikke context, så avbrudd på klientsiden
+		// påvirker ikke sendingen; feil logges uten adresse eller lenke.
+		h.sendWG.Add(1)
+		go func() {
+			defer h.sendWG.Done()
+			if err := h.mailer.SendMagicLink(email, fromName, link, locale, fromAddress); err != nil {
+				slog.Error("magic-link: kunne ikke sende e-post", "error", err)
+			}
+		}()
 	}
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("sjekk e-post"))
+}
+
+// storeToken lagrer hashen av tokenet og returnerer true bare når raden faktisk
+// ble satt inn. Mislykket lagring, kvote eller avslått metode gir ingen e-post:
+// en lenke uten rad ville vært en død lenke som i tillegg avslører at forespørselen
+// ikke ble begrenset.
+func (h *MagicHandlers) storeToken(ctx context.Context, svc *gen.Service, email, plainToken string) bool {
+	if svc == nil || svc.AuthMagicLink != 1 || !token.ValidEmail(email) {
+		return false
+	}
+	// Tjenesten er allerede resolvet; rå skjemaverdi lagres aldri, ellers kunne
+	// en ukjent service-ID gi en rad bundet til en tjeneste som ikke finnes.
+	serviceID := svc.ID
+	if err := token.CheckMagicPurpose(token.MagicPurposeService, &serviceID); err != nil {
+		slog.Error("magic-link: ugyldig formål", "error", err)
+		return false
+	}
+	now := time.Now().UTC()
+	// BACKLOG F1 K4: redirect_uri er ikke i bruk (magic-login.html sender den
+	// aldri); innlogging dekkes av redirect_uri-cookien satt klientside.
+	n, err := h.queries.InsertMagicTokenLimited(ctx, gen.InsertMagicTokenLimitedParams{
+		TokenHash:   token.HashOpaque(plainToken),
+		Email:       email,
+		ServiceID:   &serviceID,
+		Purpose:     token.MagicPurposeService,
+		CreatedAt:   now.Format(time.RFC3339),
+		ExpiresAt:   now.Add(15 * time.Minute).Format(time.RFC3339),
+		WindowStart: now.Add(-15 * time.Minute).Format(time.RFC3339),
+	})
+	if err != nil {
+		slog.Error("magic-link: kunne ikke lagre token", "service", serviceID, "error", err)
+		return false
+	}
+	return n == 1
 }
 
 // redirectWithError sender brukeren tilbake til magic-login-skjemaet med en
