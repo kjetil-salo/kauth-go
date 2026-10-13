@@ -15,6 +15,7 @@ import (
 	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/config"
 	"github.com/zral/kauth-go/internal/db/gen"
+	"github.com/zral/kauth-go/internal/fetchmeta"
 	"github.com/zral/kauth-go/internal/i18n"
 	"github.com/zral/kauth-go/internal/mail"
 	"github.com/zral/kauth-go/internal/service"
@@ -53,14 +54,7 @@ func (h *MagicHandlers) WaitForSends() { h.sendWG.Wait() }
 // ShowForm — GET /magic-login
 func (h *MagicHandlers) ShowForm(w http.ResponseWriter, r *http.Request) {
 	svc := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
-	var logoHTML template.HTML
-	if svc.LogoHtml != nil {
-		// Stored HTML rendered raw. Trust boundary: only admins with the konge role
-		// can set svc.LogoHtml (see admin/services.go). Compromised admin = stored XSS
-		// on every login page for that service. Sanitisation is intentionally not
-		// applied here; admin-side validation is the proper control.
-		logoHTML = template.HTML(*svc.LogoHtml) // #nosec G203
-	}
+	logoHTML := logoHTMLFor(svc)
 	bodyCss, beforeCss := buildBgCSS(svc.Theme, svc.BgImage, svc.BgCss)
 	locale := i18n.FromRequest(r)
 	data := LoginPageData{
@@ -77,6 +71,18 @@ func (h *MagicHandlers) ShowForm(w http.ResponseWriter, r *http.Request) {
 	// Responsen varierer med Accept-Language (via i18n.FromRequest) — caches må ta høyde for dette.
 	w.Header().Set("Vary", "Accept-Language")
 	_ = h.tmpl.ExecuteTemplate(w, "magic-login.html", data)
+}
+
+// logoHTMLFor gjør tjenestens lagrede logo om til rå HTML for malene.
+func logoHTMLFor(svc *gen.Service) template.HTML {
+	if svc.LogoHtml == nil {
+		return ""
+	}
+	// Stored HTML rendered raw. Trust boundary: only admins with the konge role
+	// can set svc.LogoHtml (see admin/services.go). Compromised admin = stored XSS
+	// on every login page for that service. Sanitisation is intentionally not
+	// applied here; admin-side validation is the proper control.
+	return template.HTML(*svc.LogoHtml) // #nosec G203
 }
 
 // resolveMagicLinkBaseURL avgjør hvilken host magic-link-e-posten skal peke til.
@@ -211,32 +217,137 @@ func (h *MagicHandlers) redirectWithError(w http.ResponseWriter, r *http.Request
 	http.Redirect(w, r, "/magic-login?"+q.Encode(), http.StatusFound)
 }
 
-// VerifyToken — GET /magic-login/{token}
-func (h *MagicHandlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
-	svcID := r.URL.Query().Get("service")
-	svc := h.reg.ResolveOrDefault(r.Host, svcID, "")
-	ip := ClientIP(r)
-	ua := r.Header.Get("User-Agent")
-	locale := i18n.FromRequest(r)
-	t := i18n.Get(locale)
+// MagicConfirmData er maldata for magic-confirm.html. Siden har med vilje ingen
+// e-postadresse: lenken kan åpnes av andre enn mottakeren (videresending,
+// delt skjerm), og adressen trengs ikke for å fullføre.
+type MagicConfirmData struct {
+	Service     *gen.Service
+	LogoHTML    template.HTML
+	BodyBgCSS   template.CSS
+	BeforeBgCSS template.CSS
+	Locale      string
+	T           i18n.Strings
+	Languages   []i18n.Link
+	// Action er stien skjemaet POST-er til (samme sti som GET).
+	Action string
+	// Blocked vises ved 403: POST-en kom ikke fra vår egen side.
+	Blocked bool
+}
 
-	magic, err := h.queries.ConsumeMagicToken(r.Context(), gen.ConsumeMagicTokenParams{
+func (h *MagicHandlers) renderConfirm(w http.ResponseWriter, r *http.Request, svc *gen.Service, status int, blocked bool) {
+	bodyCss, beforeCss := buildBgCSS(svc.Theme, svc.BgImage, svc.BgCss)
+	locale := i18n.FromRequest(r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Siden bærer et engangstoken i stien og må ikke caches.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Vary", "Accept-Language")
+	w.WriteHeader(status)
+	if err := h.tmpl.ExecuteTemplate(w, "magic-confirm.html", MagicConfirmData{
+		Service:     svc,
+		LogoHTML:    logoHTMLFor(svc),
+		BodyBgCSS:   bodyCss,
+		BeforeBgCSS: beforeCss,
+		Locale:      locale,
+		T:           i18n.Get(locale),
+		Languages:   i18n.Links(locale, r.URL),
+		// Tjeneste og språk følger med så feil etter POST havner på riktig tema
+		// og språk. svc er den lagrede tjenesten, og locale er hvitelistet.
+		Action:  r.URL.Path + "?" + url.Values{"service": {svc.ID}, "lang": {locale}}.Encode(),
+		Blocked: blocked,
+	}); err != nil {
+		slog.Error("magic-link: kunne ikke rendre bekreftelsessiden", "error", err)
+	}
+}
+
+// storedService slår opp tjenesten tokenet er bundet til. nil betyr at raden
+// ikke har en brukbar tjeneste: ukjent, inaktiv eller uten magic link. ?service=
+// i lenken er bare et tema-hint og brukes aldri her (K6).
+func (h *MagicHandlers) storedService(row gen.MagicToken) *gen.Service {
+	if row.ServiceID == nil {
+		return nil
+	}
+	svc := h.reg.Resolve("", *row.ServiceID, "")
+	if svc == nil || svc.AuthMagicLink != 1 {
+		return nil
+	}
+	return svc
+}
+
+// ShowConfirm — GET /magic-login/{token}
+// Viser bare en bekreftelsesside. E-postklienter og lenkeskannere henter
+// lenker med GET, så innloggingen skjer først på POST. Ingen rad endres og
+// ingenting telles i limiteren (P1).
+func (h *MagicHandlers) ShowConfirm(w http.ResponseWriter, r *http.Request) {
+	locale := i18n.FromRequest(r)
+	hint := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
+
+	row, err := h.queries.GetValidMagicTokenByHash(r.Context(), gen.GetValidMagicTokenByHashParams{
 		TokenHash: token.HashOpaque(chi.URLParam(r, "token")),
 		Purpose:   token.MagicPurposeService,
 		Now:       time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
+		h.redirectWithError(w, r, hint.ID, "expired", locale)
+		return
+	}
+	svc := h.storedService(row)
+	if svc == nil {
+		h.redirectWithError(w, r, hint.ID, "expired", locale)
+		return
+	}
+	h.renderConfirm(w, r, svc, http.StatusOK, false)
+}
+
+// Redeem — POST /magic-login/{token}
+func (h *MagicHandlers) Redeem(w http.ResponseWriter, r *http.Request) {
+	ip := ClientIP(r)
+	ua := r.Header.Get("User-Agent")
+	locale := i18n.FromRequest(r)
+	t := i18n.Get(locale)
+	hint := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
+
+	hash := token.HashOpaque(chi.URLParam(r, "token"))
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	if !fetchmeta.SameOrigin(r) {
+		// Blokkert siden bruker tokenets egen tjeneste som tema når den finnes,
+		// men raden røres ikke.
+		themeSvc := hint
+		if row, err := h.queries.GetValidMagicTokenByHash(r.Context(), gen.GetValidMagicTokenByHashParams{
+			TokenHash: hash, Purpose: token.MagicPurposeService, Now: now,
+		}); err == nil {
+			if stored := h.storedService(row); stored != nil {
+				themeSvc = stored
+			}
+		}
+		h.renderConfirm(w, r, themeSvc, http.StatusForbidden, true)
+		return
+	}
+
+	magic, err := h.queries.ConsumeMagicToken(r.Context(), gen.ConsumeMagicTokenParams{
+		TokenHash: hash,
+		Purpose:   token.MagicPurposeService,
+		Now:       now,
+	})
+	if err != nil {
 		// Brukertilstand, ikke serverfeil: send tilbake til skjemaet med oversatt
 		// melding så brukeren kan be om en ny lenke.
-		h.redirectWithError(w, r, svc.ID, "expired", locale)
+		h.redirectWithError(w, r, hint.ID, "expired", locale)
 		return
 	}
 	// Formålsbinding (ADN 9): et token uten tjeneste er utstedt til admin-panelet
-	// (/admin/verify) og skal ikke kunne gi en tjenesteinnlogging. Behandles som
-	// et ugyldig token. At service_id stemmer med svc sjekkes først i Fase 1.
+	// (/admin/verify) og skal ikke kunne gi en tjenesteinnlogging.
 	if magic.ServiceID == nil {
-		h.aud.Log(r.Context(), audit.Event{Type: "login_failed", AuthMethod: "magic_link", Email: magic.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false, Details: "admin-token brukt mot tjenesteinnlogging"})
-		h.redirectWithError(w, r, svc.ID, "expired", locale)
+		h.aud.Log(r.Context(), audit.Event{Type: "login_failed", AuthMethod: "magic_link", Email: magic.Email, IP: ip, UA: ua, Success: false, Details: "admin-token brukt mot tjenesteinnlogging, hint=" + hint.ID})
+		h.redirectWithError(w, r, hint.ID, "expired", locale)
+		return
+	}
+	// Alt videre bruker bare tjenesten tokenet er bundet til, aldri host eller
+	// ?service= fra denne forespørselen (K6).
+	svc := h.storedService(magic)
+	if svc == nil {
+		h.aud.Log(r.Context(), audit.Event{Type: "login_failed", AuthMethod: "magic_link", Email: magic.Email, ServiceID: *magic.ServiceID, IP: ip, UA: ua, Success: false, Details: "tjeneste inaktiv eller magic link av"})
+		h.redirectWithError(w, r, *magic.ServiceID, "expired", locale)
 		return
 	}
 

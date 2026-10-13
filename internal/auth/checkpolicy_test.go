@@ -44,7 +44,7 @@ func setupCheckPolicyService(t *testing.T, q *gen.Queries, id string, requireRol
 		ID: id, DisplayName: id, Domain: id + ".test",
 		CallbackUrl: "https://" + id + ".test/auth/callback",
 		Theme:       "light", AccentColor: "#000", EmailFromName: id,
-		AuthPassword: 1, RequireRole: requireRole,
+		AuthPassword: 1, AuthMagicLink: 1, RequireRole: requireRole,
 		JwtCookieName: "auth_token", AccessTokenTtl: "PT15M",
 		Active: 1, UpdatedAt: now,
 	}))
@@ -115,13 +115,14 @@ func TestMagicLinkVerify_RejectsUserWithoutRequiredRole(t *testing.T) {
 
 	h := auth.NewMagicHandlers(config.Config{}, q, mailSvc, iss, refSvc, reg, aud, tmpl)
 
-	req := httptest.NewRequest(http.MethodGet, "/magic-login/"+plainToken+"?service=restricted", nil)
+	req := httptest.NewRequest(http.MethodPost, "/magic-login/"+plainToken+"?service=restricted", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("token", plainToken)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 
 	w := httptest.NewRecorder()
-	h.VerifyToken(w, req)
+	h.Redeem(w, req)
 
 	require.Equal(t, http.StatusFound, w.Code)
 	loc := w.Header().Get("Location")

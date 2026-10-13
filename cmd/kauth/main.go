@@ -128,7 +128,8 @@ func main() {
 	// ── Magic link ────────────────────────────────────────────────────────────
 	r.Get("/magic-login", magicH.ShowForm)
 	r.Post("/magic-login", magicH.RequestLink)
-	r.Get("/magic-login/{token}", magicH.VerifyToken)
+	r.Get("/magic-login/{token}", magicH.ShowConfirm)
+	r.Post("/magic-login/{token}", magicH.Redeem)
 
 	// ── Token-endepunkt: refresh_token + authorization_code — CORS kun her ───
 	r.With(auth.CORSMiddleware(cfg.CORSOrigins)).Post("/token", passwordH.Token)
@@ -155,6 +156,7 @@ func main() {
 		r.Get("/login", adminAuthH.HandleLoginGet)
 		r.Post("/login", adminAuthH.HandleLoginPost)
 		r.Get("/verify", adminAuthH.HandleVerify)
+		r.Post("/verify", adminAuthH.HandleVerifyPost)
 		r.Get("/logout", adminAuthH.HandleLogout)
 		r.Get("/google-init", googleH.InitiateAdminLogin)
 		r.Get("/google-callback", adminAuthH.HandleGoogleCallback)

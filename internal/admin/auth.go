@@ -15,6 +15,7 @@ import (
 	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/config"
 	"github.com/zral/kauth-go/internal/db/gen"
+	"github.com/zral/kauth-go/internal/fetchmeta"
 	"github.com/zral/kauth-go/internal/mail"
 	"github.com/zral/kauth-go/internal/token"
 )
@@ -26,13 +27,14 @@ type magicMailer interface {
 
 // AuthHandler håndterer admin-innlogging via magic-token.
 type AuthHandler struct {
-	queries  *gen.Queries
-	issuer   *token.Issuer
-	mailer   magicMailer
-	auditor  *audit.Service
-	cfg      *config.Config
-	loginTpl *template.Template
-	sendWG   sync.WaitGroup // lar tester vente på asynkrone sendinger
+	queries   *gen.Queries
+	issuer    *token.Issuer
+	mailer    magicMailer
+	auditor   *audit.Service
+	cfg       *config.Config
+	loginTpl  *template.Template
+	verifyTpl *template.Template
+	sendWG    sync.WaitGroup // lar tester vente på asynkrone sendinger
 }
 
 func NewAuthHandler(
@@ -43,13 +45,15 @@ func NewAuthHandler(
 	cfg *config.Config,
 ) *AuthHandler {
 	tpl := template.Must(template.ParseFiles("templates/admin/login.html"))
+	verifyTpl := template.Must(template.ParseFiles("templates/admin/verify.html"))
 	return &AuthHandler{
-		queries:  queries,
-		issuer:   issuer,
-		mailer:   mailer,
-		auditor:  auditor,
-		cfg:      cfg,
-		loginTpl: tpl,
+		queries:   queries,
+		issuer:    issuer,
+		mailer:    mailer,
+		auditor:   auditor,
+		cfg:       cfg,
+		loginTpl:  tpl,
+		verifyTpl: verifyTpl,
 	}
 }
 
@@ -206,9 +210,50 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 	return nil
 }
 
-// HandleVerify verifiserer magic-token, setter admin_token-cookie og redirecter.
+type verifyPageData struct {
+	Token   string
+	Blocked bool
+}
+
+func (h *AuthHandler) renderVerify(w http.ResponseWriter, status int, data verifyPageData) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Siden bærer et engangstoken i skjemaet og må aldri ligge i en cache.
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = h.verifyTpl.Execute(w, data)
+}
+
+// HandleVerify — GET /admin/verify?token=. Viser bare en bekreftelsesside og
+// bruker ikke opp tokenet: e-postklienter og lenkeskannere henter lenker med GET
+// og skal ikke kunne bruke dem opp eller logge noen inn.
 func (h *AuthHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 	rawToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	if rawToken == "" {
+		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		return
+	}
+
+	mt, err := h.queries.GetValidMagicTokenByHash(r.Context(), gen.GetValidMagicTokenByHashParams{
+		TokenHash: token.HashOpaque(rawToken),
+		Purpose:   token.MagicPurposeAdmin,
+		Now:       time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
+	if err != nil || mt.ServiceID != nil {
+		http.Redirect(w, r, "/admin/login?err=ugyldig_token", http.StatusSeeOther)
+		return
+	}
+	h.renderVerify(w, http.StatusOK, verifyPageData{Token: rawToken})
+}
+
+// HandleVerifyPost — POST /admin/verify. Bruker opp tokenet, setter
+// admin_token-cookie og redirecter. Krever samme origin, ellers kunne en
+// annen side få nettleseren til å fullføre innloggingen med en lenke angriperen eier.
+func (h *AuthHandler) HandleVerifyPost(w http.ResponseWriter, r *http.Request) {
+	if !fetchmeta.SameOrigin(r) {
+		h.renderVerify(w, http.StatusForbidden, verifyPageData{Blocked: true})
+		return
+	}
+	rawToken := strings.TrimSpace(r.PostFormValue("token"))
 	if rawToken == "" {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return

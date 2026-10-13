@@ -186,6 +186,26 @@ func TestRequestLogger_RuteMønsterLogges(t *testing.T) {
 	}
 }
 
+// K26: POST-en som bruker opp tokenet logges som rutemønster, uten token.
+func TestRequestLogger_MagicConfirmPostMasked(t *testing.T) {
+	var buf bytes.Buffer
+	r := chi.NewRouter()
+	r.Use(ClientIPMiddleware)
+	r.Use(RequestLogger(newTestLogger(&buf)))
+	r.Post("/magic-login/{token}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusFound)
+	})
+	serveLogged(r, http.MethodPost, "/magic-login/deadbeefdeadbeef?service=x")
+	serveLogged(r, http.MethodPost, "//magic-login/deadbeefdeadbeef")
+	out := buf.String()
+	if !strings.Contains(out, "method=POST") || !strings.Contains(out, "path=/magic-login/{token}") {
+		t.Errorf("forventet POST med rutemønster:\n%s", out)
+	}
+	if strings.Contains(out, "deadbeef") {
+		t.Errorf("token lekket:\n%s", out)
+	}
+}
+
 type syncBuf struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

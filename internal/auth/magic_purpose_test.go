@@ -72,10 +72,12 @@ func TestMagicVerifyToken_PurposeBinding(t *testing.T) {
 		token.NewRefreshService(sqldb, aud), reg, aud, nil)
 
 	r := chi.NewRouter()
-	r.Get("/magic-login/{token}", h.VerifyToken)
+	r.Post("/magic-login/{token}", h.Redeem)
 	call := func(tok string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
-		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/magic-login/"+tok+"?service=klarsyn", nil))
+		req := httptest.NewRequest(http.MethodPost, "/magic-login/"+tok+"?service=klarsyn", nil)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		r.ServeHTTP(w, req)
 		return w
 	}
 

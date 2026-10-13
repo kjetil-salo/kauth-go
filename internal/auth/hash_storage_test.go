@@ -71,10 +71,12 @@ func TestMagicToken_StoredAsHash(t *testing.T) {
 
 	// Den lagrede hashen kan ikke brukes som lenke-token; klarteksten kan.
 	r := chi.NewRouter()
-	r.Get("/magic-login/{token}", h.VerifyToken)
+	r.Post("/magic-login/{token}", h.Redeem)
 	call := func(tok string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
-		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/magic-login/"+tok+"?service=klarsyn", nil))
+		req := httptest.NewRequest(http.MethodPost, "/magic-login/"+tok+"?service=klarsyn", nil)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		r.ServeHTTP(w, req)
 		return w
 	}
 	require.Contains(t, call(stored).Header().Get("Location"), "error=expired")
