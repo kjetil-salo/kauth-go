@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -277,7 +279,7 @@ func (h *PasswordHandlers) RefreshToken(w http.ResponseWriter, r *http.Request) 
 				w.Header().Del(k)
 			}
 			_ = r.ParseForm()
-			logged := sanitizeOrigin(strings.Join(vals, ","))
+			logged := sanitizeLogValue(strings.Join(vals, ","))
 			slog.Warn("refresh avvist: origin", "origin", logged, "ip", ip)
 			// Audit bare når et refresh-token faktisk er presentert, slik at
 			// anonyme kall ikke gir DB-skriving.
@@ -313,17 +315,65 @@ func (h *PasswordHandlers) RefreshToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// WithoutCancel: revokering skal fullføres selv om klienten kobler fra,
+	// ellers kan barnet fra rotasjonen overleve.
+	revokeCtx := context.WithoutCancel(r.Context())
+
 	user, err := h.queries.GetActiveUserByEmail(r.Context(), result.Email)
 	if err != nil {
+		// Rotasjonen har allerede laget et barn; det må ikke overleve en deaktivert bruker.
+		// Forbigående DB-feil revokerer ikke, så brukeren slipper ny innlogging for SQLITE_BUSY.
+		if errors.Is(err, sql.ErrNoRows) {
+			h.refresh.RevokeFamily(revokeCtx, result.FamilyID, "user_inactive")
+			h.aud.Log(r.Context(), audit.Event{Type: "refresh_user_inactive", Email: result.Email, ServiceID: result.ServiceID, IP: ip, UA: ua, Success: false})
+			clearCookie(w, "refresh_token")
+		} else {
+			slog.Error("refresh: brukeroppslag feilet", "err", err)
+		}
 		writeTokenError(w, http.StatusUnauthorized, "invalid_or_expired_token")
 		return
 	}
 
-	svc := h.reg.ResolveOrDefault("", r.FormValue("service_id"), "")
+	// Tjenesten lagret på raden er autoritativ; service_id fra klienten er bare et hint.
+	// Avvisning på tjeneste eller policy revokerer familien, så barnet fra rotasjonen blir ubrukelig.
+	deny := func(eventType, reason, details string) {
+		h.refresh.RevokeFamily(revokeCtx, result.FamilyID, reason)
+		h.aud.Log(r.Context(), audit.Event{Type: eventType, Email: result.Email, ServiceID: result.ServiceID, Details: details, IP: ip, UA: ua, Success: false})
+		clearCookie(w, "refresh_token")
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+	}
+
+	var svc *gen.Service
+	if result.ServiceID != "" {
+		svc = h.reg.Resolve("", result.ServiceID, "")
+	}
+	if svc == nil {
+		deny("refresh_service_invalid", "service_invalid", "stored_service="+sanitizeLogValue(result.ServiceID))
+		return
+	}
+
+	// Informativt event (Success: true): forespørselen innvilges for lagret tjeneste,
+	// men avviket viser klienter som sender feil service_id.
+	if given := r.FormValue("service_id"); given != "" && given != result.ServiceID {
+		h.aud.Log(r.Context(), audit.Event{
+			Type: "refresh_service_mismatch", Email: result.Email, ServiceID: result.ServiceID,
+			Details: "stored=" + result.ServiceID + " given=" + sanitizeLogValue(given),
+			IP:      ip, UA: ua, Success: true,
+		})
+	}
+
+	if err := checkPolicy(user, svc); err != nil {
+		deny("refresh_policy_denied", "policy_denied", err.Error())
+		return
+	}
 
 	at, err := h.issuer.IssueAccess(user, *svc)
 	if err != nil {
-		http.Error(w, "intern feil", http.StatusInternalServerError)
+		// Barnet fra rotasjonen ville ellers overleve, og neste forsøk utløse reuse-deteksjon.
+		slog.Error("refresh: utstedelse av access-token feilet", "err", err)
+		h.refresh.RevokeFamily(revokeCtx, result.FamilyID, "issue_failed")
+		clearCookie(w, "refresh_token")
+		writeTokenError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	setAuthCookies(w, svc, at, result.NewToken)
@@ -347,9 +397,9 @@ func writeTokenError(w http.ResponseWriter, status int, code string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 
-// sanitizeOrigin fjerner kontrolltegn og kutter til 200 tegn; Origin er
-// klientstyrt og havner i logg og audit.
-func sanitizeOrigin(o string) string {
+// sanitizeLogValue fjerner kontrolltegn og kutter til 200 tegn; verdien er
+// klientstyrt (Origin, service_id) og havner i logg og audit.
+func sanitizeLogValue(o string) string {
 	o = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return -1

@@ -119,3 +119,44 @@ func TestRotate_FamilyExpiresAt_Inherited(t *testing.T) {
 		t.Error("family_expires_at ikke arvet ved rotasjon")
 	}
 }
+
+func TestRotate_ReturnsServiceID(t *testing.T) {
+	db := &stubRefreshDB{}
+	svc := newTestRefreshSvc(db)
+	ctx := context.Background()
+	plain, _ := svc.Issue(ctx, testUser(), testService(), "127.0.0.1", "ua")
+	res, err := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if res.ServiceID != "testsvc" {
+		t.Errorf("ServiceID = %q, vil ha testsvc", res.ServiceID)
+	}
+}
+
+func TestRotate_NullServiceIDGivesEmpty(t *testing.T) {
+	db := &stubRefreshDB{}
+	svc := newTestRefreshSvc(db)
+	ctx := context.Background()
+	plain, _ := svc.Issue(ctx, testUser(), testService(), "127.0.0.1", "ua")
+	db.tokens[0].ServiceID = nil
+	res, err := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if res.ServiceID != "" {
+		t.Errorf("ServiceID = %q, vil ha tom", res.ServiceID)
+	}
+}
+
+func TestRevokeFamily_RevokesUnusedChild(t *testing.T) {
+	db := &stubRefreshDB{}
+	svc := newTestRefreshSvc(db)
+	ctx := context.Background()
+	plain, _ := svc.Issue(ctx, testUser(), testService(), "127.0.0.1", "ua")
+	res, _ := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
+	svc.RevokeFamily(ctx, res.FamilyID, "policy_denied")
+	if _, err := svc.Rotate(ctx, res.NewToken, "127.0.0.1", "ua"); err == nil {
+		t.Fatal("barnet skulle vært revokert")
+	}
+}
