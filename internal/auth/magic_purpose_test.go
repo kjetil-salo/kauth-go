@@ -56,7 +56,7 @@ func TestMagicVerifyToken_PurposeBinding(t *testing.T) {
 	aud := audit.NewNoop()
 	iss := token.NewIssuerForTest()
 	h := auth.NewMagicHandlers(config.Config{}, q, mail.New(config.Config{SMTPMock: true}), iss,
-		token.NewRefreshService(q, aud), reg, aud, nil)
+		token.NewRefreshService(sqldb, aud), reg, aud, nil)
 
 	r := chi.NewRouter()
 	r.Get("/magic-login/{token}", h.VerifyToken)

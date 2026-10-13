@@ -306,6 +306,12 @@ func (h *PasswordHandlers) RefreshToken(w http.ResponseWriter, r *http.Request) 
 
 	result, err := h.refresh.Rotate(r.Context(), plain, ip, ua)
 	if err != nil {
+		if !errors.Is(err, token.ErrTokenReuse) && !errors.Is(err, token.ErrTokenRevoked) {
+			// Intern feil (DB): klienten har ikke gjort noe galt og beholder cookien.
+			slog.Error("refresh: rotasjon feilet", "err", err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error")
+			return
+		}
 		clearCookie(w, "refresh_token")
 		if errors.Is(err, token.ErrTokenReuse) {
 			writeTokenError(w, http.StatusUnauthorized, "refresh_token_reused")

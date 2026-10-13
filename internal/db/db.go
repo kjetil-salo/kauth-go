@@ -63,7 +63,13 @@ func logPragmas(sqldb *sql.DB) {
 	slog.Info("database: åpnet", "journal_mode", journal, "busy_timeout_ms", busy)
 }
 
-// OpenMemory brukes i tester
+// OpenMemory brukes bare i tester. Én tilkobling: hver tilkobling til :memory:
+// får sin egen tomme database, så flere ville mistet skjemaet.
 func OpenMemory() (*sql.DB, *gen.Queries, error) {
-	return Open(":memory:")
+	sqldb, q, err := Open(":memory:")
+	if err != nil {
+		return nil, nil, err
+	}
+	sqldb.SetMaxOpenConns(1)
+	return sqldb, q, nil
 }

@@ -1,9 +1,13 @@
 package admin
 
 import (
+	"context"
+	"database/sql"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -286,21 +290,46 @@ func (h *UsersHandler) HandleDeactivate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	err = h.queries.DeactivateUser(r.Context(), gen.DeactivateUserParams{
+	// E-posten kommer fra brukerraden (RETURNING), ikke fra URL/skjema:
+	// refresh_tokens.email matches eksakt og må ha samme case som lagret.
+	email, err := h.queries.DeactivateUser(r.Context(), gen.DeactivateUserParams{
 		DeactivatedAt: &now,
 		ID:            id,
 	})
+	if errors.Is(err, sql.ErrNoRows) {
+		http.NotFound(w, r)
+		return
+	}
 	if err != nil {
-		http.Error(w, "databasefeil: "+err.Error(), http.StatusInternalServerError)
+		slog.Error("admin: deaktivering feilet", "id", id, "err", err)
+		http.Error(w, "databasefeil", http.StatusInternalServerError)
 		return
 	}
 
-	h.auditor.Log(r.Context(), audit.Event{
+	// WithoutCancel: revokeringen skal fullføres selv om admin kobler fra.
+	// Feiler den, står deaktiveringen; refresh for en deaktivert bruker avvises
+	// uansett (refresh_user_inactive).
+	ctx := context.WithoutCancel(r.Context())
+	reason := "user_deactivated"
+	var details string
+	revoked, err := h.queries.RevokeUserRefreshTokens(ctx, gen.RevokeUserRefreshTokensParams{
+		RevokedReason: &reason,
+		Email:         email,
+	})
+	if err != nil {
+		slog.Error("admin: revokering av refresh-tokens etter deaktivering feilet", "id", id, "err", err)
+		details = fmt.Sprintf("id=%d revoke_failed", id)
+	} else {
+		details = fmt.Sprintf("id=%d revoked=%d", id, revoked)
+	}
+
+	h.auditor.Log(ctx, audit.Event{
 		Type:    "user_deactivated",
+		Email:   email,
 		IP:      extractIP(r),
 		UA:      r.UserAgent(),
 		Success: true,
-		Details: fmt.Sprintf("id=%d", id),
+		Details: details,
 	})
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }

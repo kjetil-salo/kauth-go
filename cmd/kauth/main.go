@@ -67,7 +67,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("token issuer: %v", err)
 	}
-	refreshSvc := token.NewRefreshService(queries, auditSvc)
+	refreshSvc := token.NewRefreshService(sqlDB, auditSvc)
 
 	// ── 6. Parse HTML-maler ──────────────────────────────────────────────────
 	tmpl := template.Must(template.ParseGlob("templates/*.html"))
@@ -79,7 +79,7 @@ func main() {
 	googleH := auth.NewGoogleHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc, adminSessions)
 	msH := auth.NewMicrosoftHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
 	passwordH := auth.NewPasswordHandlers(queries, issuer, refreshSvc, registry, auditSvc, cfg.PasswordLoginEnabled).WithCORSOrigins(cfg.CORSOrigins)
-	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, Queries: queries, Audit: auditSvc, DefaultSvcID: ""}
+	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, Queries: queries, Audit: auditSvc, Refresh: refreshSvc, DefaultSvcID: ""}
 	meH := &auth.MeHandler{Issuer: issuer, CookieName: "auth_token"}
 
 	// ── 8. Initialiser admin-handlers ────────────────────────────────────────

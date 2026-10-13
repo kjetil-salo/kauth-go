@@ -13,7 +13,17 @@ RETURNING *;
 -- name: RevokeFamilyTokens :exec
 UPDATE refresh_tokens
 SET revoked = 1, revoked_reason = ?
-WHERE family_id = ? AND used = 0 AND revoked = 0;
+WHERE family_id = ? AND revoked = 0;
+
+-- name: RevokeUserRefreshTokens :execrows
+UPDATE refresh_tokens
+SET revoked = 1, revoked_reason = ?
+WHERE email = ? AND revoked = 0;
+
+-- name: GetRefreshChild :one
+SELECT created_at FROM refresh_tokens
+WHERE family_id = ? AND parent_id = ?
+LIMIT 1;
 
 -- name: DeleteExpiredRefreshTokens :exec
 DELETE FROM refresh_tokens

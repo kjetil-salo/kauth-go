@@ -166,7 +166,8 @@
         <div class="msg-error">
             {{if eq .Error "access_denied"}}{{.T.ErrAccessDenied}}
             {{else if eq .Error "invalid_redirect"}}{{.T.ErrInvalidRedirect}}
-            {{else}}{{.Error}}
+            {{else if eq .Error "login_failed"}}{{.T.ErrLoginFailed}}
+            {{else}}{{.T.ErrLoginFailed}}
             {{end}}
         </div>
         {{end}}

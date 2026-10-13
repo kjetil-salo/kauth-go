@@ -59,8 +59,12 @@ func (s *stubRefreshDB) RevokeFamilyTokens(_ context.Context, p gen.RevokeFamily
 	return nil
 }
 
+func (s *stubRefreshDB) GetRefreshChild(_ context.Context, _ gen.GetRefreshChildParams) (string, error) {
+	return "", sql.ErrNoRows
+}
+
 func newTestRefreshSvc(db token.RefreshQuerier) *token.RefreshService {
-	return token.NewRefreshService(db, audit.NewNoop())
+	return token.NewRefreshServiceWithRunner(db, token.StubTxRunner(db), audit.NewNoop())
 }
 
 func TestRotate_IssueAndRotate(t *testing.T) {

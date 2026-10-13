@@ -70,7 +70,7 @@ func newRefreshFx(t *testing.T, aRole *string, aEnforce int64, aOrg *string) (*r
 	require.NoError(t, err)
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(context.Background()))
-	refSvc := token.NewRefreshService(q, audit.NewService(q))
+	refSvc := token.NewRefreshService(sqldb, audit.NewService(q))
 	h := auth.NewPasswordHandlers(q, token.NewIssuerForTest(), refSvc, reg, audit.NewService(q), true)
 	return &refreshFx{h: h, q: q, sqldb: sqldb, refSvc: refSvc, reg: reg, user: user}, a, b
 }
@@ -254,7 +254,8 @@ func TestRefreshService_PolicyDeniedRevokesFamily(t *testing.T) {
 				"SELECT COALESCE(SUM(used=0 AND revoked=0),0), COALESCE(SUM(revoked=1),0) FROM refresh_tokens WHERE family_id = ?",
 				fam.FamilyID).Scan(&live, &revoked))
 			assert.Equal(t, 0, live)
-			assert.Equal(t, 1, revoked)
+			// Familie-revokering tar også den brukte forelderen (008 F1).
+			assert.Equal(t, 2, revoked)
 		})
 	}
 }
@@ -298,7 +299,8 @@ func TestRefreshService_DeactivatedUserUnauthorized(t *testing.T) {
 	plain, err := f.refSvc.Issue(context.Background(), f.user, a, "127.0.0.1", "t")
 	require.NoError(t, err)
 	now := time.Now().UTC().Format(time.RFC3339)
-	require.NoError(t, f.q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: f.user.ID}))
+	_, err = f.q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: f.user.ID})
+	require.NoError(t, err)
 	w := f.post(plain, "")
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.NotContains(t, w.Body.String(), "access_token")
@@ -332,4 +334,11 @@ func TestRefreshService_ParallelSameTokenExactlyOne(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, int32(1), ok)
+}
+
+func TestRefreshService_UnknownTokenIs401InvalidOrExpired(t *testing.T) {
+	f, _, _ := newRefreshFx(t, nil, 0, nil)
+	w := f.post("aldri-utstedt", "svca")
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "invalid_or_expired_token")
 }

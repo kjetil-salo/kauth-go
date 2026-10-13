@@ -15,7 +15,7 @@ Running in production across a handful of services.
 ## What kauth does
 
 - Issues JWTs (RS256)
-- Rotates refresh tokens with reuse detection (OAuth BCP §4.13)
+- Rotates refresh tokens atomically with reuse detection (OAuth BCP §4.13): presenting an already-consumed or revoked token revokes the whole family, including the newest token. Logout revokes the family too. Client errors give `401 invalid_or_expired_token` / `refresh_token_reused`; internal errors give `500 server_error`
 - Exposes JWKS and OpenID Discovery under `/.well-known/`
 - Speaks standard OIDC `authorization_code` + PKCE (RFC 6749 §4.1, RFC 7636, mandatory for every `response_type=code` request — no confidential-client exception) — a real `id_token` with `aud`/`nonce`, so an external client you don't control the code of can plug in an off-the-shelf OIDC library instead of the bespoke token-in-URL flow. See [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
 - Offers four sign-in paths per service: Google OIDC, Microsoft OIDC, email magic link, and passwords (the last one off by default — see *The passwordless choice* below)
@@ -55,6 +55,8 @@ openssl rsa -pubout -in secrets/privateKey.pem -out secrets/publicKey.pem
 ```
 
 Migrations run automatically at startup.
+
+The login page only shows known error codes (`login_failed`, `access_denied`) as generic messages; internal error text is never displayed.
 
 ## Onboarding a new service
 
@@ -177,7 +179,7 @@ A plain static site (no server-side code) can't run an OIDC flow itself — it h
 
 Reference implementation: `authgate/` in the univers repo (same host) — plain Go, no external dependencies, ~300 lines.
 
-Because access tokens are stateless, neither kauth nor a gate like this can stop an already-issued, unexpired token — deactivating a user in kauth only takes effect on their next login/refresh. If a single user needs to be forced out immediately without touching other services behind the same kauth instance, that has to be solved locally in the gate (see "Forcing a user out" in `authgate/README.md`) — a small file mapping email to a timestamp, checked against the token's `iat` on every request.
+Because access tokens are stateless, neither kauth nor a gate like this can stop an already-issued, unexpired token — deactivating a user in kauth revokes all their refresh tokens immediately, but access tokens already issued live until their TTL. If a single user needs to be forced out immediately without touching other services behind the same kauth instance, that has to be solved locally in the gate (see "Forcing a user out" in `authgate/README.md`) — a small file mapping email to a timestamp, checked against the token's `iat` on every request.
 
 ## Setting up Google OIDC
 
@@ -187,6 +189,8 @@ Per service, or globally for all of them. Per service is recommended when the se
 2. Authorized redirect URI: `https://<auth_host>/callback` for every auth host the service should support.
 3. Set `google_client_id` and `google_client_secret` on the service row — or `KAUTH_GOOGLE_CLIENT_ID` / `KAUTH_GOOGLE_CLIENT_SECRET` globally if all services share one client.
 4. Set `auth_google = 1` on the service.
+
+kauth sends a `nonce` and checks it against the `id_token`, and requires `email_verified` to be true; otherwise the sign-in is rejected.
 
 ## Setting up Microsoft OIDC
 
@@ -198,7 +202,11 @@ Same recipe, but in the [Microsoft Entra Admin Center](https://entra.microsoft.c
 4. Store `microsoft_client_id` and `microsoft_client_secret` on the service row, or globally.
 5. Set `auth_microsoft = 1`.
 
-The Microsoft flow uses the `/common` endpoint and verifies the ID token with `SkipIssuerCheck`, because personal and work accounts carry different `iss` claims. Signature verification stays strict.
+The Microsoft flow uses the `/common` endpoint, and kauth checks `iss` itself against `https://login.microsoftonline.com/{tid}/v2.0` using the token's `tid`. Personal accounts are recognised by tenant id `9188040d-6c67-4c5b-b112-36a304b66dad`. A `nonce` is sent and verified, and signature verification is strict.
+
+Work and school accounts require the optional claim `xms_edov` (proof that the email domain is verified, the nOAuth guard). In the app registration: Token configuration → Add optional claim → ID → `xms_edov` and `email`. Without it, organisation sign-ins are rejected. There is no fallback to `preferred_username`.
+
+Many corporate tenants require admin consent for multi-tenant apps; users then see "Need admin approval". That is resolved in their tenant and is outside kauth.
 
 ### Finding the app registration again in Entra
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"html"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -536,4 +537,64 @@ func TestServiceErrorPage_DoesNotCarrySecretsToTemplate(t *testing.T) {
 	assert.Nil(t, got.MicrosoftClientSecret)
 	assert.Nil(t, got.GoogleClientID)
 	assert.Nil(t, got.MicrosoftClientID)
+}
+
+// 008 F6 (K16): Invalidate-feil etter lagring logges og gir advarsel, uten rollback.
+
+// brokenRegistry gir et register hvis database er lukket, slik at Invalidate feiler
+// mens handlerens egen database fortsatt virker.
+func brokenRegistry(t *testing.T) *service.Registry {
+	t.Helper()
+	bdb, bq, err := db.OpenMemory()
+	require.NoError(t, err)
+	require.NoError(t, bdb.Close())
+	return service.NewRegistry(bq)
+}
+
+func TestServiceSave_InvalidateFailure_ShowsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	e := setupServicesEnv(t)
+	e.seed(t, "alpha", "alpha.test")
+	h := NewServicesHandler(e.q, brokenRegistry(t), audit.NewService(e.q))
+	r := chi.NewRouter()
+	r.Get("/admin/services", h.HandleList)
+	r.Get("/admin/services/{id}/edit", h.HandleEdit)
+	r.Post("/admin/services/{id}", h.HandleUpdate)
+	r.Post("/admin/services", h.HandleCreate)
+	e.mux = r
+
+	// update
+	vals, _ := e.renderedFormValues(t, "alpha")
+	vals.Set("display_name", "Endret")
+	w := e.post("alpha", vals)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/admin/services?warn=cache", w.Header().Get("Location"))
+	assert.Equal(t, "Endret", e.row(t, "alpha").DisplayName)
+
+	// create
+	cv := url.Values{
+		"id": {"gamma"}, "display_name": {"Gamma"}, "domain": {"gamma.test"},
+		"callback_url": {"https://gamma.test/cb"}, "auth_google": {"1"}, "active": {"1"},
+	}
+	w = e.postCreate(cv)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/admin/services?warn=cache", w.Header().Get("Location"))
+	assert.Equal(t, "Gamma", e.row(t, "gamma").DisplayName)
+	assert.Contains(t, buf.String(), "cache-invalidering feilet")
+
+	const msg = "Lagret, men ikke aktivert."
+	get := func(q string) string {
+		rec := httptest.NewRecorder()
+		e.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/services"+q, nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		return rec.Body.String()
+	}
+	assert.Contains(t, get("?warn=cache"), msg)
+	assert.NotContains(t, get("?warn=annet"), msg)
+	assert.NotContains(t, get("?warn=%3Cscript%3Eannet"), "<script>annet")
+	assert.NotContains(t, get(""), msg)
 }

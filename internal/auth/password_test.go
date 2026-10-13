@@ -46,7 +46,7 @@ func setupRefreshTest(t *testing.T) (*auth.PasswordHandlers, *token.RefreshServi
 
 	iss := token.NewIssuerForTest()
 	aud := audit.NewNoop()
-	refSvc := token.NewRefreshService(q, aud)
+	refSvc := token.NewRefreshService(sqldb, aud)
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(ctx))
 

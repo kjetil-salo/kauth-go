@@ -50,7 +50,8 @@ func newAdminFlowFixture(t *testing.T) *adminFlowFixture {
 	mkUser("vanlig@example.com", "user")
 	mkUser("sysadmin@example.com", "sysadmin")
 	deact := mkUser("deaktivert@example.com", "konge")
-	require.NoError(t, q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: deact.ID}))
+	_, err = q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: deact.ID})
+	require.NoError(t, err)
 
 	svcs := []gen.Service{{
 		ID: "klarsyn", DisplayName: "Klarsyn", Domain: "klarsyn.net", IsDefault: 1,
@@ -70,7 +71,7 @@ func newAdminFlowFixture(t *testing.T) *adminFlowFixture {
 		EmailFromName: "Klarsyn", AuthGoogle: 1, AutoRegister: 1,
 		JwtCookieName: "auth_token", AccessTokenTtl: "PT15M", Active: 1, UpdatedAt: now,
 	}))
-	h := NewGoogleHandlers(cfg, q, issuer, token.NewRefreshService(q, auditSvc), service.NewRegistryForTest(svcs), auditSvc, starter)
+	h := NewGoogleHandlers(cfg, q, issuer, token.NewRefreshService(sqldb, auditSvc), service.NewRegistryForTest(svcs), auditSvc, starter)
 
 	return &adminFlowFixture{h: h, svc: &svcs[0], q: q, issuer: issuer, cfg: cfg, svcs: svcs,
 		countFn: func() int64 {
@@ -112,7 +113,7 @@ func TestCompleteAdminLogin_ActiveKongeGetsAdminCookie(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/callback", nil)
 	w := httptest.NewRecorder()
-	f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: "konge@example.com", EmailVerified: true})
+	f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: "konge@example.com", EmailVerified: true}, "n", "n")
 
 	require.Equal(t, http.StatusSeeOther, w.Code)
 	require.Equal(t, "/admin/users", w.Header().Get("Location"))
@@ -150,7 +151,7 @@ func TestCompleteAdminLogin_RejectsAndNeverCreatesUsers(t *testing.T) {
 
 			req := httptest.NewRequest(http.MethodGet, "/callback", nil)
 			w := httptest.NewRecorder()
-			f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: email, EmailVerified: true})
+			f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: email, EmailVerified: true}, "n", "n")
 
 			require.Equal(t, http.StatusSeeOther, w.Code)
 			require.Equal(t, "/admin/login?err=ingen_tilgang", w.Header().Get("Location"))
@@ -180,10 +181,10 @@ func TestInitiateAdminLogin_SignedAdminStateNoRedirectCookie(t *testing.T) {
 
 	sc := cookieNamed(w, "oidc_state")
 	require.NotNil(t, sc)
-	svc, admin, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
+	claims, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
 	require.True(t, ok)
-	require.True(t, admin)
-	require.Equal(t, "klarsyn", svc)
+	require.True(t, claims.Admin)
+	require.Equal(t, "klarsyn", claims.ServiceID)
 
 	loc, err := url.Parse(w.Header().Get("Location"))
 	require.NoError(t, err)
@@ -202,13 +203,13 @@ func TestInitiateLogin_StateIsNeverAdminFromQuery(t *testing.T) {
 
 	sc := cookieNamed(w, "oidc_state")
 	require.NotNil(t, sc)
-	_, admin, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
+	claims, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
 	require.True(t, ok)
-	require.False(t, admin)
+	require.False(t, claims.Admin)
 }
 
 // Callbacken avgjør formål bare fra signert state: en vanlig state der
-// angriperen har hektet ":admin" på payloaden, med den gamle MAC-en, gir 400
+// angriperen har hektet ":admin" på payloaden, med den gamle MAC-en, gir 303 til generisk login_failed
 // både som cookie og som query før noe mot Google skjer.
 func TestHandleCallback_ForgedAdminPurposeRejected(t *testing.T) {
 	f := newAdminFlowFixture(t)
@@ -219,7 +220,8 @@ func TestHandleCallback_ForgedAdminPurposeRejected(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "oidc_state", Value: forged})
 	w := httptest.NewRecorder()
 	f.h.HandleCallback(w, req)
-	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	require.Equal(t, "/login?error=login_failed", w.Header().Get("Location"))
 	require.Nil(t, cookieNamed(w, "admin_token"))
 }
 
@@ -229,7 +231,7 @@ func TestFinishCallback_PlainLoginKongeGoesToDispatchWithoutAdminCookie(t *testi
 	f := newAdminFlowFixture(t)
 	req := httptest.NewRequest(http.MethodGet, "/callback", nil)
 	w := httptest.NewRecorder()
-	f.h.finishCallback(w, req, f.svc, false, googleClaims{Email: "konge@example.com", EmailVerified: true})
+	f.h.finishCallback(w, req, f.svc, false, googleClaims{Email: "konge@example.com", EmailVerified: true}, "n", "n")
 
 	require.Equal(t, http.StatusFound, w.Code)
 	require.True(t, strings.HasPrefix(w.Header().Get("Location"), "/dispatch?"), w.Header().Get("Location"))
@@ -242,7 +244,7 @@ func TestFinishCallback_Admin_EmailVerifiedRequiredAndNormalized(t *testing.T) {
 	// Ikke verifisert: avvist selv om kontoen er en konge.
 	w := httptest.NewRecorder()
 	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, true,
-		googleClaims{Email: "konge@example.com", EmailVerified: false})
+		googleClaims{Email: "konge@example.com", EmailVerified: false}, "n", "n")
 	require.Equal(t, "/admin/login?err=ingen_tilgang", w.Header().Get("Location"))
 	require.Nil(t, cookieNamed(w, "admin_token"))
 	ev := f.auditEvents(t, "admin_google_login", 1)
@@ -251,7 +253,7 @@ func TestFinishCallback_Admin_EmailVerifiedRequiredAndNormalized(t *testing.T) {
 	// Store bokstaver og blanke rundt adressen normaliseres før oppslaget.
 	w = httptest.NewRecorder()
 	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, true,
-		googleClaims{Email: "  Konge@Example.COM ", EmailVerified: true})
+		googleClaims{Email: "  Konge@Example.COM ", EmailVerified: true}, "n", "n")
 	require.Equal(t, "/admin/users", w.Header().Get("Location"))
 	require.NotNil(t, cookieNamed(w, "admin_token"))
 }
@@ -261,6 +263,7 @@ func TestFinishCallback_Admin_EmailVerifiedRequiredAndNormalized(t *testing.T) {
 // (ingen nett i testen; code er tom).
 func TestHandleCallback_AdminFailureIsAudited(t *testing.T) {
 	f := newAdminFlowFixture(t)
+	f.useFailingTokenEndpoint(t)
 	st := signAdminState(f.cfg.OIDCStateSecret, "klarsyn", "n")
 	req := httptest.NewRequest(http.MethodGet, "/callback?state="+url.QueryEscape(st), nil)
 	req.Host = "klarsyn.net"
@@ -268,7 +271,8 @@ func TestHandleCallback_AdminFailureIsAudited(t *testing.T) {
 	w := httptest.NewRecorder()
 	f.h.HandleCallback(w, req)
 
-	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	require.Equal(t, "/admin/login?err=ingen_tilgang", w.Header().Get("Location"))
 	ev := f.auditEvents(t, "admin_google_login", 1)
 	require.Equal(t, int64(0), ev[0].Success)
 	require.NotNil(t, ev[0].ServiceID)
