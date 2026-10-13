@@ -1,9 +1,9 @@
 package service
 
 import (
-	"testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/zral/kauth-go/internal/db/gen"
+	"testing"
 )
 
 func strPtr(s string) *string { return &s }

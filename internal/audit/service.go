@@ -34,7 +34,9 @@ func NewNoop() *Service { return &Service{queries: nil} }
 
 // Log skriver hendelse asynkront — blokkerer aldri auth-flyten.
 func (s *Service) Log(ctx context.Context, e Event) {
-	if s.queries == nil { return } // no-op i tester
+	if s.queries == nil {
+		return
+	} // no-op i tester
 	go func() {
 		success := int64(0)
 		if e.Success {
