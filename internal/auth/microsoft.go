@@ -2,11 +2,13 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -32,6 +34,8 @@ type MicrosoftHandlers struct {
 	refresh *token.RefreshService
 	reg     *service.Registry
 	aud     *audit.Service
+	// fetchClaims er en testsøm; nil betyr ekte kodeutveksling og verifisering.
+	fetchClaims func(ctx context.Context, cfg *oauth2.Config, code string) (msClaims, error)
 }
 
 func NewMicrosoftHandlers(cfg config.Config, q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service) *MicrosoftHandlers {
@@ -71,7 +75,7 @@ func (h *MicrosoftHandlers) InitiateLogin(w http.ResponseWriter, r *http.Request
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
-	http.Redirect(w, r, oauthCfg.AuthCodeURL(state, oauth2.SetAuthURLParam("prompt", "select_account")), http.StatusFound)
+	http.Redirect(w, r, oauthCfg.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.SetAuthURLParam("prompt", "select_account")), http.StatusFound)
 }
 
 // HandleCallback — GET /ms-callback
@@ -79,15 +83,15 @@ func (h *MicrosoftHandlers) HandleCallback(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	sc, err := r.Cookie("ms_state")
 	if err != nil || sc.Value != r.URL.Query().Get("state") {
-		http.Error(w, "ugyldig state", http.StatusBadRequest)
-		return
-	}
-	svcID, ok := VerifyState(h.cfg.OIDCStateSecret, sc.Value)
-	if !ok {
 		redirectLoginError(w, r, "", errCodeLoginFailed)
 		return
 	}
-	svc := h.reg.ResolveOrDefault(r.Host, svcID, "")
+	claims, ok := parseState(h.cfg.OIDCStateSecret, sc.Value)
+	if !ok || claims.Admin {
+		redirectLoginError(w, r, "", errCodeLoginFailed)
+		return
+	}
+	svc := h.reg.ResolveOrDefault(r.Host, claims.ServiceID, "")
 	clientID, clientSecret := msCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
@@ -99,59 +103,100 @@ func (h *MicrosoftHandlers) HandleCallback(w http.ResponseWriter, r *http.Reques
 			TokenURL: msAuthBase + "/token",
 		},
 	}
-	oauth2Token, err := oauthCfg.Exchange(ctx, r.URL.Query().Get("code"))
+	fetch := h.fetchClaims
+	if fetch == nil {
+		fetch = fetchMSClaims
+	}
+	cl, err := fetch(ctx, oauthCfg, r.URL.Query().Get("code"))
 	if err != nil {
-		http.Error(w, "token-utveksling feilet", http.StatusUnauthorized)
+		if errors.Is(err, errClaimsDecode) {
+			h.auditRejected(r, svc, cl.Tid, msReasonClaimsDecode)
+		} else {
+			slog.Warn("microsoft: id_token-henting feilet", "error", err)
+		}
+		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 		return
 	}
+	h.finishCallback(w, r, svc, cl, claims.Nonce)
+}
+
+var errClaimsDecode = errors.New("claims kunne ikke dekodes")
+
+// fetchMSClaims bytter koden, verifiserer id_token-signaturen og dekoder claims.
+// Ved dekodingsfeil returneres det som lot seg lese av tid sammen med errClaimsDecode.
+func fetchMSClaims(ctx context.Context, cfg *oauth2.Config, code string) (msClaims, error) {
+	oauth2Token, err := cfg.Exchange(ctx, code)
+	if err != nil {
+		return msClaims{}, fmt.Errorf("kodeutveksling: %w", err)
+	}
 	rawIDToken, _ := oauth2Token.Extra("id_token").(string)
-	// SkipIssuerCheck er nødvendig: Microsoft /common-endepunkt utsteder per-tenant issuer-claims
+	// SkipIssuerCheck er nødvendig: /common utsteder per-tenant iss. Signatur,
+	// audience og utløp verifiseres fortsatt; issuer sjekkes i validateMSClaims.
 	verifier := oidc.NewVerifier(
 		msAuthBase,
 		oidc.NewRemoteKeySet(ctx, "https://login.microsoftonline.com/common/discovery/v2.0/keys"),
-		&oidc.Config{ClientID: clientID, SkipIssuerCheck: true},
+		&oidc.Config{ClientID: cfg.ClientID, SkipIssuerCheck: true},
 	)
 	idToken, err := verifier.Verify(ctx, rawIDToken)
 	if err != nil {
-		http.Error(w, "id_token ugyldig: "+err.Error(), http.StatusUnauthorized)
-		return
+		return msClaims{}, fmt.Errorf("id_token: %w", err)
 	}
-	// Fix 5: multi-line struct for readability (same fields and tags as brief)
-	var cl struct {
-		Email             string `json:"email"`
-		PreferredUsername string `json:"preferred_username"`
-		Name              string `json:"name"`
-	}
-	// Fix 1: handle Claims error rather than silently ignoring it
+	var cl msClaims
 	if err := idToken.Claims(&cl); err != nil {
-		http.Error(w, "kunne ikke lese claims", http.StatusUnauthorized)
-		return
+		var partial struct {
+			Tid string `json:"tid"`
+		}
+		_ = idToken.Claims(&partial)
+		return msClaims{Tid: partial.Tid}, errClaimsDecode
 	}
-	// Enterprise accounts often have empty email; fall back to UPN-ish preferred_username
-	email := cl.Email
-	if email == "" {
-		email = cl.PreferredUsername
+	return cl, nil
+}
+
+func (h *MicrosoftHandlers) auditRejected(r *http.Request, svc *gen.Service, tid, reason string) {
+	details := "reason=" + reason
+	if tid != "" {
+		details = "tid=" + sanitizeLogValue(tid) + " " + details
+	}
+	h.aud.Log(r.Context(), audit.Event{Type: "microsoft_oidc_rejected", AuthMethod: "microsoft", ServiceID: svc.ID,
+		IP: ClientIP(r), UA: r.Header.Get("User-Agent"), Success: false, Details: details})
+}
+
+// finishCallback tar over etter at id_token er signaturverifisert, slik at
+// claims-avslag og policy kan testes uten nettverk.
+func (h *MicrosoftHandlers) finishCallback(w http.ResponseWriter, r *http.Request, svc *gen.Service, cl msClaims, stateNonce string) {
+	ctx := r.Context()
+	ip, ua := ClientIP(r), r.Header.Get("User-Agent")
+	email, reason := validateMSClaims(cl, stateNonce)
+	email = strings.TrimSpace(email)
+	if reason != "" {
+		h.auditRejected(r, svc, cl.Tid, reason)
+		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
+		return
 	}
 	user, err := h.findOrCreate(ctx, email, cl.Name, svc)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		if errors.Is(err, errNoAccount) {
+			redirectLoginError(w, r, svc.ID, errCodeAccessDenied)
+			return
+		}
+		slog.Error("microsoft: kunne ikke opprette bruker", "error", err)
+		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 		return
 	}
 	if err := checkPolicy(user, svc); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		redirectLoginError(w, r, svc.ID, errCodeAccessDenied)
 		return
 	}
-	ip, ua := ClientIP(r), r.Header.Get("User-Agent")
-	// Fix 2: handle IssueAccess error rather than silently ignoring it
 	at, err := h.issuer.IssueAccess(user, *svc)
 	if err != nil {
-		http.Error(w, "kunne ikke utstede token", http.StatusInternalServerError)
+		slog.Error("microsoft: kunne ikke utstede token", "error", err)
+		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 		return
 	}
-	// Fix 3: handle Issue error rather than silently ignoring it (use = not :=; err already in scope)
 	rt, err := h.refresh.Issue(ctx, user, *svc, ip, ua)
 	if err != nil {
-		http.Error(w, "kunne ikke utstede refresh-token", http.StatusInternalServerError)
+		slog.Error("microsoft: kunne ikke utstede refresh-token", "error", err)
+		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 		return
 	}
 	setRefreshCookie(w, rt)
@@ -170,7 +215,7 @@ func (h *MicrosoftHandlers) findOrCreate(ctx context.Context, email, name string
 		return u, nil
 	}
 	if svc.AutoRegister != 1 {
-		return gen.User{}, fmt.Errorf("ingen konto")
+		return gen.User{}, errNoAccount
 	}
 	role := "user"
 	if svc.DefaultRole != nil && *svc.DefaultRole != "" {
