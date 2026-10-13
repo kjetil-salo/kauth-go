@@ -84,7 +84,7 @@ func (h *MicrosoftHandlers) HandleCallback(w http.ResponseWriter, r *http.Reques
 	}
 	svcID, ok := VerifyState(h.cfg.OIDCStateSecret, sc.Value)
 	if !ok {
-		http.Error(w, "ugyldig HMAC", http.StatusBadRequest)
+		redirectLoginError(w, r, "", errCodeLoginFailed)
 		return
 	}
 	svc := h.reg.ResolveOrDefault(r.Host, svcID, "")

@@ -209,7 +209,7 @@ func TestInitiateLogin_StateIsNeverAdminFromQuery(t *testing.T) {
 }
 
 // Callbacken avgjør formål bare fra signert state: en vanlig state der
-// angriperen har hektet ":admin" på payloaden, med den gamle MAC-en, gir 400
+// angriperen har hektet ":admin" på payloaden, med den gamle MAC-en, gir 303 til generisk login_failed
 // både som cookie og som query før noe mot Google skjer.
 func TestHandleCallback_ForgedAdminPurposeRejected(t *testing.T) {
 	f := newAdminFlowFixture(t)
@@ -220,7 +220,8 @@ func TestHandleCallback_ForgedAdminPurposeRejected(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "oidc_state", Value: forged})
 	w := httptest.NewRecorder()
 	f.h.HandleCallback(w, req)
-	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	require.Equal(t, "/login?error=login_failed", w.Header().Get("Location"))
 	require.Nil(t, cookieNamed(w, "admin_token"))
 }
 

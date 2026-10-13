@@ -23,6 +23,7 @@ var catalog = map[string]Strings{
 		BackToSignIn:      "Back to sign-in",
 
 		ErrAccessDenied:    "Access denied.",
+		ErrLoginFailed:     "Sign-in failed. Please try again.",
 		ErrInvalidRedirect: "Invalid return address. Please start the sign-in again.",
 		ErrExpiredLink:     "The link has expired or has already been used. Please try again.",
 		ErrTooManyRequests: "Too many requests. Please wait a few minutes and try again.",
@@ -53,6 +54,7 @@ var catalog = map[string]Strings{
 		BackToSignIn:      "Tilbake til innlogging",
 
 		ErrAccessDenied:    "Tilgang nektet.",
+		ErrLoginFailed:     "Innloggingen feilet. Prøv igjen.",
 		ErrInvalidRedirect: "Ugyldig retur-adresse. Start innloggingen på nytt.",
 		ErrExpiredLink:     "Lenken er utløpt eller allerede brukt. Prøv igjen.",
 		ErrTooManyRequests: "For mange forespørsler. Vent noen minutter og prøv igjen.",
@@ -83,6 +85,7 @@ var catalog = map[string]Strings{
 		BackToSignIn:      "Zurück zur Anmeldung",
 
 		ErrAccessDenied:    "Zugriff verweigert.",
+		ErrLoginFailed:     "Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut.",
 		ErrInvalidRedirect: "Ungültige Rücksprungadresse. Bitte starten Sie die Anmeldung neu.",
 		ErrExpiredLink:     "Der Link ist abgelaufen oder wurde bereits verwendet. Bitte versuchen Sie es erneut.",
 		ErrTooManyRequests: "Zu viele Anfragen. Bitte warten Sie einige Minuten und versuchen Sie es erneut.",

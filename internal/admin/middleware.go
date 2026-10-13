@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -24,7 +25,8 @@ func AdminAuthMiddleware(issuer *token.Issuer) func(http.Handler) http.Handler {
 			// fra før aud ble innført, skal ikke gi admin-tilgang.
 			claims, err := issuer.Verify(cookie.Value, token.ExpectAdmin)
 			if err != nil {
-				respondUnauthorized(w, r, "ugyldig token: "+err.Error())
+				slog.Debug("admin-token avvist", "error", err)
+				respondUnauthorized(w, r, "unauthorized")
 				return
 			}
 

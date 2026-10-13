@@ -124,7 +124,7 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 	// andre cookies.
 	claims, ok := parseState(h.cfg.OIDCStateSecret, sc.Value)
 	if !ok {
-		http.Error(w, "ugyldig HMAC", http.StatusBadRequest)
+		redirectLoginError(w, r, "", errCodeLoginFailed)
 		return
 	}
 	svcID, adminPurpose := claims.ServiceID, claims.Admin

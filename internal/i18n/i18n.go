@@ -51,6 +51,8 @@ type Strings struct {
 	ErrExpiredLink     string
 	ErrTooManyRequests string
 	ErrNoAccount       string
+	// ErrLoginFailed vises for login_failed og for alle ukjente ?error=-verdier.
+	ErrLoginFailed string
 	// ErrInternal vises ved serverfeil. Bevisst generisk — den spesifikke
 	// årsaken hører i loggen, ikke på skjermen til noen som ikke kan bruke den.
 	ErrInternal string
