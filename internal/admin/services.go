@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"os"
@@ -47,6 +48,16 @@ func NewServicesHandler(
 	}
 }
 
+// invalidateCache returnerer redirect-målet. Lagringen er allerede utført og rulles
+// ikke tilbake; ellers ville admin tro at tjenesten er aktiv når cachen er utdatert.
+func (h *ServicesHandler) invalidateCache(r *http.Request, serviceID string) string {
+	if err := h.registry.Invalidate(r.Context()); err != nil {
+		slog.Error("admin: cache-invalidering feilet etter lagring av tjeneste", "service_id", serviceID, "error", err)
+		return "/admin/services?warn=cache"
+	}
+	return "/admin/services"
+}
+
 // HandleList viser alle tjenester (aktive og inaktive).
 func (h *ServicesHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	services, err := h.queries.ListAllServices(r.Context())
@@ -55,7 +66,12 @@ func (h *ServicesHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = h.listTpl.Execute(w, map[string]interface{}{"Services": services})
+	// Bare faste koder gir tekst i malen; verdien fra query-strengen speiles aldri.
+	warn := ""
+	if r.URL.Query().Get("warn") == "cache" {
+		warn = "cache"
+	}
+	_ = h.listTpl.Execute(w, map[string]interface{}{"Services": services, "Warn": warn})
 }
 
 // HandleNew rendrer skjema for ny tjeneste med fornuftige standardverdier.
@@ -114,8 +130,7 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ugyldiggjør cache — ikke kritisk hvis det feiler.
-	_ = h.registry.Invalidate(r.Context())
+	redirectTo := h.invalidateCache(r, svcID)
 
 	details := "service_created"
 	if uploaded {
@@ -129,7 +144,7 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		Details:   details,
 		Success:   true,
 	})
-	http.Redirect(w, r, "/admin/services", http.StatusSeeOther)
+	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
 }
 
 // HandleEdit rendrer redigeringsskjema for eksisterende tjeneste.
@@ -207,7 +222,7 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = h.registry.Invalidate(r.Context())
+	redirectTo := h.invalidateCache(r, id)
 
 	details := "service_edited"
 	if uploaded {
@@ -221,7 +236,7 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		Details:   details,
 		Success:   true,
 	})
-	http.Redirect(w, r, "/admin/services", http.StatusSeeOther)
+	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
 }
 
 // handleBgImageUpload leser bg_image_upload fra multipart-skjema.

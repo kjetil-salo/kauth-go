@@ -24,6 +24,7 @@
         .btn { padding: 0.4rem 0.9rem; border-radius: 5px; border: none; font-size: 0.875rem; cursor: pointer; text-decoration: none; display: inline-block; }
         .btn-primary { background: #3b82f6; color: #fff; }
         .btn-sm { padding: 0.25rem 0.6rem; font-size: 0.8rem; }
+        .warn { background: #422006; color: #fcd34d; border: 1px solid #854d0e; padding: 0.6rem 0.9rem; border-radius: 5px; margin-bottom: 1rem; font-size: 0.875rem; }
         .btn-outline { background: transparent; border: 1px solid #334155; color: #94a3b8; }
     </style>
 </head>
@@ -38,6 +39,7 @@
 </nav>
 <main>
     <h1>Tjenester</h1>
+    {{if eq .Warn "cache"}}<div class="warn" role="alert">Lagret, men ikke aktivert. Lagre på nytt eller restart kauth.</div>{{end}}
     <div class="toolbar">
         <a href="/admin/services/new" class="btn btn-primary btn-sm">+ Ny tjeneste</a>
     </div>

@@ -120,6 +120,11 @@ func resolveMagicLinkBaseURL(cfg config.Config, svc *gen.Service) string {
 	return cfg.BaseURL
 }
 
+// randRead er byttbar slik at testen kan simulere feil. Fra Go 1.24 krasjer
+// crypto/rand heller enn å returnere feil, så grenen er et forsvar mot
+// framtidige endringer, ikke en sti som nås i drift.
+var randRead = rand.Read
+
 // RequestLink — POST /magic-login
 // Returnerer alltid 200 (anti-enumeration). Minimum 200ms responstid.
 func (h *MagicHandlers) RequestLink(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +152,13 @@ func (h *MagicHandlers) RequestLink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := randRead(b); err != nil {
+		// Et token uten entropi må aldri lagres eller sendes. Feilen avslører ikke
+		// om eposten finnes, så anti-enumeration-kravet brytes ikke.
+		slog.Error("magic-link: kunne ikke generere token", "error", err)
+		http.Error(w, "intern feil", http.StatusInternalServerError)
+		return
+	}
 	plainToken := hex.EncodeToString(b)
 	now := time.Now().UTC()
 
