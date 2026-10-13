@@ -15,7 +15,7 @@ Kjører i prod på et knippe tjenester.
 ## Hva kauth gjør
 
 - Utsteder JWT-er (RS256)
-- Roterer refresh-tokens med reuse-deteksjon (RFC OAuth-BCP §4.13)
+- Roterer refresh-tokens atomisk med reuse-deteksjon (OAuth-BCP §4.13): et allerede brukt eller revokert token som presenteres revokerer hele familien, også det nyeste tokenet. Logout revokerer også familien. Klientfeil gir `401 invalid_or_expired_token` / `refresh_token_reused`, interne feil `500 server_error`
 - Eksponerer JWKS og OpenID Discovery på `/.well-known/`
 - Snakker standard OIDC `authorization_code` + PKCE (RFC 6749 §4.1, RFC 7636, obligatorisk for enhver `response_type=code`-forespørsel — ingen unntak for konfidensielle klienter) — et ekte `id_token` med `aud`/`nonce`, slik at en ekstern klient du ikke kontrollerer koden til kan bruke et vanlig OIDC-bibliotek i stedet for den bespoke token-i-URL-flyten. Se [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
 - Tilbyr fire innloggingsveier per tjeneste: Google OIDC, Microsoft OIDC, magic-link på e-post, og passord (sistnevnte av som default — se *Det passordløse valget* nedenfor)
@@ -55,6 +55,8 @@ openssl rsa -pubout -in secrets/privateKey.pem -out secrets/publicKey.pem
 ```
 
 Migrasjoner kjører automatisk ved oppstart.
+
+Innloggingssiden viser bare kjente feilkoder (`login_failed`, `access_denied`) som generiske meldinger; intern feiltekst vises aldri.
 
 ## Onboarde en ny tjeneste
 
@@ -173,7 +175,7 @@ En ren statisk side (ingen server-side kode) kan ikke selv gjennomføre en OIDC-
 
 Referanseimplementasjon: `authgate/` i univers-repoet (samme maskin) — ren Go, ingen eksterne avhengigheter, ~300 linjer.
 
-Siden access-tokens er statsløse, kan verken kauth eller en slik gate stoppe et allerede utstedt, ikke-utløpt token — deaktivering av en bruker i kauth virker først ved neste innlogging/refresh. Skal én bestemt bruker kunne tvinges ut umiddelbart uten å røre andre tjenester bak samme kauth-instans, må det løses lokalt i gaten (se "Tving ut en bruker" i `authgate/README.md`) — en liten fil med e-post → tidsstempel, sjekket mot tokenets `iat` på hver request.
+Siden access-tokens er statsløse, kan verken kauth eller en slik gate stoppe et allerede utstedt, ikke-utløpt token — deaktivering av en bruker i kauth revokerer alle brukerens refresh-tokens umiddelbart, men allerede utstedte access-tokens lever til TTL utløper. Skal én bestemt bruker kunne tvinges ut umiddelbart uten å røre andre tjenester bak samme kauth-instans, må det løses lokalt i gaten (se "Tving ut en bruker" i `authgate/README.md`) — en liten fil med e-post → tidsstempel, sjekket mot tokenets `iat` på hver request.
 
 ## Sette opp Google OIDC
 
@@ -183,6 +185,8 @@ Per tjeneste, eller globalt for alle. Per tjeneste anbefales hvis tjenestene til
 2. Authorized redirect URI: `https://<auth_host>/callback` for hver auth-host tjenesten din skal støtte.
 3. Sett `google_client_id` og `google_client_secret` på service-raden — eller `KAUTH_GOOGLE_CLIENT_ID` / `KAUTH_GOOGLE_CLIENT_SECRET` globalt hvis alle tjenestene deler én klient.
 4. Sett `auth_google = 1` på tjenesten.
+
+kauth sender en `nonce` og sjekker den mot `id_token`, og krever at `email_verified` er sann; ellers avvises innloggingen.
 
 ## Sette opp Microsoft OIDC
 
@@ -194,7 +198,11 @@ Samme oppskrift, men i [Microsoft Entra Admin Center](https://entra.microsoft.co
 4. Lagre `MicrosoftClientID` og `MicrosoftClientSecret` på service-raden eller globalt.
 5. Sett `auth_microsoft = 1`.
 
-Microsoft-flyten bruker `/common`-endepunktet og verifiserer ID-tokenet med `SkipIssuerCheck`, siden personlige kontoer og bedriftskontoer har ulike `iss`-claims. Signaturverifikasjon er fortsatt streng.
+Microsoft-flyten bruker `/common`-endepunktet, og kauth sjekker selv `iss` mot `https://login.microsoftonline.com/{tid}/v2.0` med tokenets `tid`. Personlige kontoer gjenkjennes på tenant-id `9188040d-6c67-4c5b-b112-36a304b66dad`. `nonce` sendes og verifiseres, og signaturverifikasjonen er streng.
+
+Jobb- og skolekontoer krever optional claim `xms_edov` (bevis på at e-postdomenet er verifisert, vern mot nOAuth). I app-registreringen: Token configuration → Add optional claim → ID → `xms_edov` og `email`. Uten den avvises org-innlogging. Det finnes ingen fallback til `preferred_username`.
+
+Mange bedrifts-tenants krever admin-samtykke for multi-tenant-apper; brukeren ser da «Need admin approval». Det løses i deres tenant og ligger utenfor kauth.
 
 ### Finne app-registreringen igjen i Entra
 
