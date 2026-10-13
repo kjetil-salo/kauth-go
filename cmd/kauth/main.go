@@ -67,7 +67,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("token issuer: %v", err)
 	}
-	refreshSvc := token.NewRefreshService(queries, auditSvc)
+	refreshSvc := token.NewRefreshService(sqlDB, auditSvc)
 
 	// ── 6. Parse HTML-maler ──────────────────────────────────────────────────
 	tmpl := template.Must(template.ParseGlob("templates/*.html"))

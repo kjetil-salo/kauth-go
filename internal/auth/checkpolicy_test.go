@@ -71,7 +71,7 @@ func TestDoLogin_RejectsUserWithoutRequiredRole(t *testing.T) {
 
 	iss := token.NewIssuerForTest()
 	aud := audit.NewNoop()
-	refSvc := token.NewRefreshService(q, aud)
+	refSvc := token.NewRefreshService(sqldb, aud)
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(ctx))
 	h := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud, true)
@@ -107,7 +107,7 @@ func TestMagicLinkVerify_RejectsUserWithoutRequiredRole(t *testing.T) {
 
 	iss := token.NewIssuerForTest()
 	aud := audit.NewNoop()
-	refSvc := token.NewRefreshService(q, aud)
+	refSvc := token.NewRefreshService(sqldb, aud)
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(ctx))
 	mailSvc := mail.New(config.Config{SMTPMock: true})
@@ -148,7 +148,7 @@ func TestDoLogin_GlobalSwitchOffReturns403(t *testing.T) {
 
 	iss := token.NewIssuerForTest()
 	aud := audit.NewNoop()
-	refSvc := token.NewRefreshService(q, aud)
+	refSvc := token.NewRefreshService(sqldb, aud)
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(ctx))
 

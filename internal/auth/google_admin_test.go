@@ -70,7 +70,7 @@ func newAdminFlowFixture(t *testing.T) *adminFlowFixture {
 		EmailFromName: "Klarsyn", AuthGoogle: 1, AutoRegister: 1,
 		JwtCookieName: "auth_token", AccessTokenTtl: "PT15M", Active: 1, UpdatedAt: now,
 	}))
-	h := NewGoogleHandlers(cfg, q, issuer, token.NewRefreshService(q, auditSvc), service.NewRegistryForTest(svcs), auditSvc, starter)
+	h := NewGoogleHandlers(cfg, q, issuer, token.NewRefreshService(sqldb, auditSvc), service.NewRegistryForTest(svcs), auditSvc, starter)
 
 	return &adminFlowFixture{h: h, svc: &svcs[0], q: q, issuer: issuer, cfg: cfg, svcs: svcs,
 		countFn: func() int64 {

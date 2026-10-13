@@ -70,7 +70,7 @@ func newRefreshFx(t *testing.T, aRole *string, aEnforce int64, aOrg *string) (*r
 	require.NoError(t, err)
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(context.Background()))
-	refSvc := token.NewRefreshService(q, audit.NewService(q))
+	refSvc := token.NewRefreshService(sqldb, audit.NewService(q))
 	h := auth.NewPasswordHandlers(q, token.NewIssuerForTest(), refSvc, reg, audit.NewService(q), true)
 	return &refreshFx{h: h, q: q, sqldb: sqldb, refSvc: refSvc, reg: reg, user: user}, a, b
 }
@@ -333,4 +333,11 @@ func TestRefreshService_ParallelSameTokenExactlyOne(t *testing.T) {
 	}
 	wg.Wait()
 	assert.Equal(t, int32(1), ok)
+}
+
+func TestRefreshService_UnknownTokenIs401InvalidOrExpired(t *testing.T) {
+	f, _, _ := newRefreshFx(t, nil, 0, nil)
+	w := f.post("aldri-utstedt", "svca")
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "invalid_or_expired_token")
 }

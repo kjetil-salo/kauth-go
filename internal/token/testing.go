@@ -1,10 +1,12 @@
 package token
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"time"
 
+	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/db/gen"
 )
 
@@ -42,3 +44,17 @@ func (i *Issuer) SignForTest(claims Claims) string {
 	}
 	return s
 }
+
+// NewRefreshServiceWithRunner lar tester injisere stub-querier og egen
+// transaksjonsløper. Kun ment for testoppsett; produksjon bruker NewRefreshService.
+func NewRefreshServiceWithRunner(q RefreshQuerier, run TxRunner, aud *audit.Service) *RefreshService {
+	return &RefreshService{db: q, run: run, audit: aud}
+}
+
+// StubTxRunner kjører fn direkte mot q uten transaksjon (for stub-querier).
+func StubTxRunner(q RefreshQuerier) TxRunner {
+	return func(_ context.Context, fn func(RefreshQuerier) error) error { return fn(q) }
+}
+
+// HashForTest eksponerer token-hashen slik at tester kan slå opp rader.
+func HashForTest(plain string) string { return hashToken(plain) }
