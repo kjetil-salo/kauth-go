@@ -124,7 +124,17 @@ KAUTH_CORS_ORIGINS=https://app1.example.com,https://app2.example.com
 
 If the app is missing from that list, the browser reports `No 'Access-Control-Allow-Origin' header is present` and the refresh round fails silently — the client keeps its old refresh token, the next attempt trips reuse detection, and the user is thrown back to the login page. The symptom looks like "logged out after 15 minutes" but the cause is in the network layer, not the token layer.
 
+A literal `*` is rejected at startup, as is any entry that isn't a plain origin.
+
+`POST /token` with `grant_type=refresh_token` also checks the `Origin` header. A request without `Origin` (server-to-server) passes as before; one with an `Origin` outside `KAUTH_CORS_ORIGINS` gets `403 {"error":"invalid_origin"}` and no CORS headers, and the refresh token is not consumed.
+
 Edit `.env` and restart kauth when you onboard a new SPA.
+
+### Listen address and password login
+
+`KAUTH_HTTP_ADDR` is the IP kauth binds to (an IP literal, no port; the port comes from `KAUTH_HTTP_PORT`). It defaults to `127.0.0.1`. Set `0.0.0.0` or `::` explicitly to expose kauth on the LAN; a hostname or invalid value stops startup.
+
+`KAUTH_PASSWORD_LOGIN_ENABLED` is a global switch for password login, off by default. Only `true` or `false` is accepted. While off, `POST /do-login` returns 403 and the password form is hidden, regardless of a service's `auth_password`. Turning it on gives password login without rate limiting, so leave it off unless you need it.
 
 ### Background image
 
@@ -152,7 +162,7 @@ The login template automatically applies `background: url('/static/polaris-hero.
 Checklist for a new `auth_host` behind the same tunnel as the rest of the fleet:
 
 1. `cloudflared tunnel route dns --overwrite-dns <tunnel-id> <auth_host>`
-2. Add an ingress row to `/etc/cloudflared/config.yml` pointing `<auth_host>` at `http://localhost:<KAUTH_HTTP_PORT>` — the same port the other auth hosts use.
+2. Add an ingress row to `/etc/cloudflared/config.yml` pointing `<auth_host>` at `http://127.0.0.1:<KAUTH_HTTP_PORT>` — the same port the other auth hosts use.
 3. `cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate` before restarting.
 4. `systemctl restart kauth` (picks up the new service row into the registry cache) and `systemctl restart cloudflared` (shared with every other service behind the tunnel — a brief interruption for all of them, not just the new one).
 
@@ -263,7 +273,7 @@ Backups live in `scripts/backup-kauth-go.sh` — a daily copy via cron at 03:00,
 
 Logs go to journald through `log/slog` in structured format. Cleanup jobs (magic tokens, refresh tokens, audit events) run hourly as background goroutines.
 
-Cloudflare Tunnel sits in front: kauth listens on localhost, the tunnel terminates TLS and puts the client IP in the `CF-Connecting-IP` header. No holes in the firewall beyond that.
+Cloudflare Tunnel sits in front: kauth listens on `127.0.0.1` by default (`KAUTH_HTTP_ADDR`), the tunnel terminates TLS and puts the client IP in the `CF-Connecting-IP` header. kauth trusts `CF-Connecting-IP` only when the connection comes from loopback (cloudflared); otherwise the TCP peer address is used. `X-Forwarded-For` and similar headers are ignored. No holes in the firewall beyond that.
 
 ## Architecture in broad strokes
 
