@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -38,6 +40,8 @@ type GoogleHandlers struct {
 	reg           *service.Registry
 	aud           *audit.Service
 	adminSessions AdminSessionStarter
+	// endpoint overstyres bare i tester, så kodeutveksling ikke treffer Google.
+	endpoint *oauth2.Endpoint
 }
 
 func NewGoogleHandlers(cfg config.Config, q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service, adminSessions AdminSessionStarter) *GoogleHandlers {
@@ -108,7 +112,7 @@ func (h *GoogleHandlers) redirectToGoogle(w http.ResponseWriter, r *http.Request
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
-	authURL := oauthCfg.AuthCodeURL(state, oauth2.SetAuthURLParam("prompt", "select_account"))
+	authURL := oauthCfg.AuthCodeURL(state, oauth2.SetAuthURLParam("prompt", "select_account"), oidc.Nonce(nonce))
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -117,7 +121,7 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	sc, err := r.Cookie("oidc_state")
 	if err != nil || sc.Value != r.URL.Query().Get("state") {
-		http.Error(w, "ugyldig state", http.StatusBadRequest)
+		redirectLoginError(w, r, "", errCodeLoginFailed)
 		return
 	}
 	// Admin-formålet leses bare fra den signerte staten, aldri fra query eller
@@ -133,41 +137,69 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		Endpoint:     googleOAuth2.Endpoint,
+		Endpoint:     h.tokenEndpoint(),
 		RedirectURL:  "https://" + r.Host + "/callback",
 		Scopes:       []string{oidc.ScopeOpenID, "email", "profile"},
 	}
-	// Feil etter at staten er kjent som admin auditeres som mislykket
-	// admin-innlogging, ikke bare som en HTTP-feil.
-	fail := func(status int, msg, details string) {
-		if adminPurpose {
-			h.auditAdminFailure(r, svc, "", details)
-		}
-		http.Error(w, msg, status)
-	}
+	fail := func(reason string) { h.rejectCallback(w, r, svc, adminPurpose, reason) }
 	oauth2Token, err := oauthCfg.Exchange(ctx, r.URL.Query().Get("code"))
 	if err != nil {
-		fail(http.StatusUnauthorized, "token-utveksling feilet", "kodeutveksling feilet")
+		fail("code_exchange")
 		return
 	}
-	// Bug-fix: handle provider discovery error (brief silently ignored it)
 	provider, err := oidc.NewProvider(ctx, "https://accounts.google.com")
 	if err != nil {
-		fail(http.StatusInternalServerError, "OIDC discovery feilet", "OIDC discovery feilet")
+		fail("discovery")
 		return
 	}
 	rawIDToken, _ := oauth2Token.Extra("id_token").(string)
 	idToken, err := provider.Verifier(&oidc.Config{ClientID: clientID}).Verify(ctx, rawIDToken)
 	if err != nil {
-		fail(http.StatusUnauthorized, "id_token ugyldig", "id_token ugyldig")
+		fail("id_token")
 		return
 	}
 	var cl googleClaims
 	if err := idToken.Claims(&cl); err != nil {
-		fail(http.StatusUnauthorized, "kunne ikke lese claims", "kunne ikke lese claims")
+		fail("claims")
 		return
 	}
-	h.finishCallback(w, r, svc, adminPurpose, cl)
+	h.finishCallback(w, r, svc, adminPurpose, cl, idToken.Nonce, claims.Nonce)
+}
+
+// rejectCallback avviser en callback med generisk respons. Teknisk årsak går til
+// audit og logg, aldri til responsen. Admin-feil auditeres som mislykket
+// admin-innlogging.
+func (h *GoogleHandlers) rejectCallback(w http.ResponseWriter, r *http.Request, svc *gen.Service, adminPurpose bool, reason string) {
+	slog.Debug("google: callback avvist", "reason", reason)
+	if adminPurpose {
+		h.auditAdminFailure(r, svc, "", "reason="+reason)
+		redirectAdminLoginError(w, r)
+		return
+	}
+	h.auditRejected(r, svc, "", "reason="+reason)
+	redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
+}
+
+// checkIDTokenNonce sammenligner nonce i id_token med den i den signerte
+// staten. Tom nonce på en av sidene avvises, ellers ville to tomme verdier
+// passert.
+func checkIDTokenNonce(tokenNonce, stateNonce string) bool {
+	if tokenNonce == "" || stateNonce == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(tokenNonce), []byte(stateNonce)) == 1
+}
+
+// auditRejected skriver google_oidc_rejected for vanlig gren.
+func (h *GoogleHandlers) auditRejected(r *http.Request, svc *gen.Service, email, reason string) {
+	h.aud.Log(r.Context(), audit.Event{Type: "google_oidc_rejected", AuthMethod: "google", Email: email, ServiceID: svc.ID, IP: ClientIP(r), UA: r.Header.Get("User-Agent"), Success: false, Details: reason})
+}
+
+func (h *GoogleHandlers) tokenEndpoint() oauth2.Endpoint {
+	if h.endpoint != nil {
+		return *h.endpoint
+	}
+	return googleOAuth2.Endpoint
 }
 
 // googleClaims er det vi trenger fra Googles id_token.
@@ -179,21 +211,39 @@ type googleClaims struct {
 
 // finishCallback er alt som skjer etter at id_token er verifisert og claims er
 // lest. Skilt ut fra HandleCallback slik at begge grenene kan testes uten
-// Google.
-func (h *GoogleHandlers) finishCallback(w http.ResponseWriter, r *http.Request, svc *gen.Service, adminPurpose bool, cl googleClaims) {
+// Google. Nonce-sjekken ligger her så den dekkes av tester uten live IdP.
+func (h *GoogleHandlers) finishCallback(w http.ResponseWriter, r *http.Request, svc *gen.Service, adminPurpose bool, cl googleClaims, tokenNonce, stateNonce string) {
 	ctx := r.Context()
+	// Binder id_token til akkurat denne innloggingsøkten (replay av et token
+	// fra en annen økt avvises). Først, så begge grener dekkes.
+	if !checkIDTokenNonce(tokenNonce, stateNonce) {
+		h.rejectCallback(w, r, svc, adminPurpose, "nonce")
+		return
+	}
 	if adminPurpose {
 		clearCookie(w, "oidc_state")
 		h.completeAdminLogin(w, r, svc, cl)
 		return
 	}
+	// Uverifisert e-post gir verken oppslag eller auto-registrering, ellers
+	// kan en uverifisert adresse overta eller opprette en konto.
+	if !cl.EmailVerified {
+		h.auditRejected(r, svc, strings.ToLower(strings.TrimSpace(cl.Email)), "reason=email_unverified")
+		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
+		return
+	}
 	user, err := h.findOrCreate(ctx, cl.Email, cl.Name, svc)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		if errors.Is(err, errNoAccount) {
+			redirectLoginError(w, r, svc.ID, errCodeAccessDenied)
+			return
+		}
+		slog.Error("google: kunne ikke opprette bruker", "error", err)
+		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 		return
 	}
 	if err := checkPolicy(user, svc); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		redirectLoginError(w, r, svc.ID, errCodeAccessDenied)
 		return
 	}
 	ip, ua := ClientIP(r), r.Header.Get("User-Agent")
@@ -231,7 +281,7 @@ func (h *GoogleHandlers) completeAdminLogin(w http.ResponseWriter, r *http.Reque
 	ctx := r.Context()
 	reject := func(email, details string) {
 		h.auditAdminFailure(r, svc, email, details)
-		http.Redirect(w, r, "/admin/login?err=ingen_tilgang", http.StatusSeeOther)
+		redirectAdminLoginError(w, r)
 	}
 	// Normalisert slik at oppslaget ikke avhenger av hvordan Google skriver adressen.
 	email := strings.ToLower(strings.TrimSpace(cl.Email))
@@ -261,13 +311,16 @@ func (h *GoogleHandlers) completeAdminLogin(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 
+// errNoAccount skiller «ingen konto» fra tekniske feil i findOrCreate.
+var errNoAccount = errors.New("ingen konto")
+
 func (h *GoogleHandlers) findOrCreate(ctx context.Context, email, name string, svc *gen.Service) (gen.User, error) {
 	u, err := h.queries.GetActiveUserByEmail(ctx, email)
 	if err == nil {
 		return u, nil
 	}
 	if svc.AutoRegister != 1 {
-		return gen.User{}, fmt.Errorf("ingen konto")
+		return gen.User{}, errNoAccount
 	}
 	role := "user"
 	if svc.DefaultRole != nil && *svc.DefaultRole != "" {

@@ -113,7 +113,7 @@ func TestCompleteAdminLogin_ActiveKongeGetsAdminCookie(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/callback", nil)
 	w := httptest.NewRecorder()
-	f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: "konge@example.com", EmailVerified: true})
+	f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: "konge@example.com", EmailVerified: true}, "n", "n")
 
 	require.Equal(t, http.StatusSeeOther, w.Code)
 	require.Equal(t, "/admin/users", w.Header().Get("Location"))
@@ -151,7 +151,7 @@ func TestCompleteAdminLogin_RejectsAndNeverCreatesUsers(t *testing.T) {
 
 			req := httptest.NewRequest(http.MethodGet, "/callback", nil)
 			w := httptest.NewRecorder()
-			f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: email, EmailVerified: true})
+			f.h.finishCallback(w, req, f.svc, true, googleClaims{Email: email, EmailVerified: true}, "n", "n")
 
 			require.Equal(t, http.StatusSeeOther, w.Code)
 			require.Equal(t, "/admin/login?err=ingen_tilgang", w.Header().Get("Location"))
@@ -231,7 +231,7 @@ func TestFinishCallback_PlainLoginKongeGoesToDispatchWithoutAdminCookie(t *testi
 	f := newAdminFlowFixture(t)
 	req := httptest.NewRequest(http.MethodGet, "/callback", nil)
 	w := httptest.NewRecorder()
-	f.h.finishCallback(w, req, f.svc, false, googleClaims{Email: "konge@example.com", EmailVerified: true})
+	f.h.finishCallback(w, req, f.svc, false, googleClaims{Email: "konge@example.com", EmailVerified: true}, "n", "n")
 
 	require.Equal(t, http.StatusFound, w.Code)
 	require.True(t, strings.HasPrefix(w.Header().Get("Location"), "/dispatch?"), w.Header().Get("Location"))
@@ -244,7 +244,7 @@ func TestFinishCallback_Admin_EmailVerifiedRequiredAndNormalized(t *testing.T) {
 	// Ikke verifisert: avvist selv om kontoen er en konge.
 	w := httptest.NewRecorder()
 	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, true,
-		googleClaims{Email: "konge@example.com", EmailVerified: false})
+		googleClaims{Email: "konge@example.com", EmailVerified: false}, "n", "n")
 	require.Equal(t, "/admin/login?err=ingen_tilgang", w.Header().Get("Location"))
 	require.Nil(t, cookieNamed(w, "admin_token"))
 	ev := f.auditEvents(t, "admin_google_login", 1)
@@ -253,7 +253,7 @@ func TestFinishCallback_Admin_EmailVerifiedRequiredAndNormalized(t *testing.T) {
 	// Store bokstaver og blanke rundt adressen normaliseres før oppslaget.
 	w = httptest.NewRecorder()
 	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, true,
-		googleClaims{Email: "  Konge@Example.COM ", EmailVerified: true})
+		googleClaims{Email: "  Konge@Example.COM ", EmailVerified: true}, "n", "n")
 	require.Equal(t, "/admin/users", w.Header().Get("Location"))
 	require.NotNil(t, cookieNamed(w, "admin_token"))
 }
@@ -263,6 +263,7 @@ func TestFinishCallback_Admin_EmailVerifiedRequiredAndNormalized(t *testing.T) {
 // (ingen nett i testen; code er tom).
 func TestHandleCallback_AdminFailureIsAudited(t *testing.T) {
 	f := newAdminFlowFixture(t)
+	f.useFailingTokenEndpoint(t)
 	st := signAdminState(f.cfg.OIDCStateSecret, "klarsyn", "n")
 	req := httptest.NewRequest(http.MethodGet, "/callback?state="+url.QueryEscape(st), nil)
 	req.Host = "klarsyn.net"
@@ -270,7 +271,8 @@ func TestHandleCallback_AdminFailureIsAudited(t *testing.T) {
 	w := httptest.NewRecorder()
 	f.h.HandleCallback(w, req)
 
-	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	require.Equal(t, "/admin/login?err=ingen_tilgang", w.Header().Get("Location"))
 	ev := f.auditEvents(t, "admin_google_login", 1)
 	require.Equal(t, int64(0), ev[0].Success)
 	require.NotNil(t, ev[0].ServiceID)
