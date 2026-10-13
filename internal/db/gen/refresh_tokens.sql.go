@@ -70,6 +70,24 @@ func (q *Queries) DeleteExpiredRefreshTokens(ctx context.Context, arg DeleteExpi
 	return err
 }
 
+const getRefreshChild = `-- name: GetRefreshChild :one
+SELECT created_at FROM refresh_tokens
+WHERE family_id = ? AND parent_id = ?
+LIMIT 1
+`
+
+type GetRefreshChildParams struct {
+	FamilyID string `json:"family_id"`
+	ParentID *int64 `json:"parent_id"`
+}
+
+func (q *Queries) GetRefreshChild(ctx context.Context, arg GetRefreshChildParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, getRefreshChild, arg.FamilyID, arg.ParentID)
+	var created_at string
+	err := row.Scan(&created_at)
+	return created_at, err
+}
+
 const getRefreshTokenByHash = `-- name: GetRefreshTokenByHash :one
 SELECT id, token_hash, email, service_id, family_id, parent_id, created_at, expires_at, family_expires_at, used, revoked, revoked_reason, ip_address, user_agent FROM refresh_tokens WHERE token_hash = ? LIMIT 1
 `
@@ -135,7 +153,7 @@ func (q *Queries) InsertRefreshToken(ctx context.Context, arg InsertRefreshToken
 const revokeFamilyTokens = `-- name: RevokeFamilyTokens :exec
 UPDATE refresh_tokens
 SET revoked = 1, revoked_reason = ?
-WHERE family_id = ? AND used = 0 AND revoked = 0
+WHERE family_id = ? AND revoked = 0
 `
 
 type RevokeFamilyTokensParams struct {
@@ -146,4 +164,23 @@ type RevokeFamilyTokensParams struct {
 func (q *Queries) RevokeFamilyTokens(ctx context.Context, arg RevokeFamilyTokensParams) error {
 	_, err := q.db.ExecContext(ctx, revokeFamilyTokens, arg.RevokedReason, arg.FamilyID)
 	return err
+}
+
+const revokeUserRefreshTokens = `-- name: RevokeUserRefreshTokens :execrows
+UPDATE refresh_tokens
+SET revoked = 1, revoked_reason = ?
+WHERE email = ? AND revoked = 0
+`
+
+type RevokeUserRefreshTokensParams struct {
+	RevokedReason *string `json:"revoked_reason"`
+	Email         string  `json:"email"`
+}
+
+func (q *Queries) RevokeUserRefreshTokens(ctx context.Context, arg RevokeUserRefreshTokensParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeUserRefreshTokens, arg.RevokedReason, arg.Email)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

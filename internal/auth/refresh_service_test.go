@@ -254,7 +254,8 @@ func TestRefreshService_PolicyDeniedRevokesFamily(t *testing.T) {
 				"SELECT COALESCE(SUM(used=0 AND revoked=0),0), COALESCE(SUM(revoked=1),0) FROM refresh_tokens WHERE family_id = ?",
 				fam.FamilyID).Scan(&live, &revoked))
 			assert.Equal(t, 0, live)
-			assert.Equal(t, 1, revoked)
+			// Familie-revokering tar også den brukte forelderen (008 F1).
+			assert.Equal(t, 2, revoked)
 		})
 	}
 }
