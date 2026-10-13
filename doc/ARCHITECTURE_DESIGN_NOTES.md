@@ -74,7 +74,7 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 
 ## ADN 10 — Føderert identitet krever leverandørbekreftet e-post, og refresh-familier revokeres som helhet (2026-10-13)
 
-**Status:** Foreslått
+**Status:** Vedtatt (2026-10-13)
 → Analyse: [doc/features/008_AN_HERD_FLYTER.md](features/008_AN_HERD_FLYTER.md)
 
 **Beslutning:**

@@ -41,3 +41,7 @@ Sist gjennomgått: 2026-10-13
 | Fase 3–6 | Forutsetter Fase 2 | ROADMAP §5 |
 | Apple Sign In | Løpende kostnad. Kommer som adapter etter Fase 4 ved dokumentert behov | ADN 7 |
 | GitHub/LinkedIn m.fl. | Kan i stor grad dekkes av generisk OIDC (Fase 4) | ROADMAP §5 |
+| Normaliser e-post (lowercase/trim) ved oppslag i Google- og MS-flyten | I dag kan case-varianter gi duplikatkontoer (008 F11 S1) | — |
+| Deaktivert bruker på tjeneste med auto-register gir `login_failed` i stedet for `access_denied` | Uventet feilkode, ufarlig (008 F10 S2) | — |
+| Audit for «ingen konto», policybrudd og DB-feil i vanlig gren av Google-flyten | Bare avvisning på `email_verified` auditeres i dag (008 F10 S3) | — |
+| OIDC-klient i authorization_code-flyten mister `oidc_authz` ved ugyldig state og får ingen spec-feil-redirect | Klienten ender på `/login` i stedet for `redirect_uri?error=` (008 F9 S3) | — |
