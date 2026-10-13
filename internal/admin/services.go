@@ -1,8 +1,10 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -75,8 +77,9 @@ func (h *ServicesHandler) HandleNew(w http.ResponseWriter, r *http.Request) {
 
 // HandleCreate oppretter ny tjeneste fra POST-skjema.
 func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(2 << 20); err != nil {
-		_ = r.ParseForm()
+	if err := r.ParseMultipartForm(2 << 20); err != nil && !errors.Is(err, http.ErrNotMultipart) {
+		http.Error(w, "ugyldig skjema", http.StatusBadRequest)
+		return
 	}
 
 	svcID := strings.TrimSpace(r.FormValue("id"))
@@ -86,6 +89,11 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := validateAuthHost(r.FormValue("auth_host")); err != nil {
+		h.renderServiceError(w, serviceFromForm(r), true, err.Error())
+		return
+	}
+
+	if err := validateEnforceOrg(r); err != nil {
 		h.renderServiceError(w, serviceFromForm(r), true, err.Error())
 		return
 	}
@@ -127,17 +135,10 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 // HandleEdit rendrer redigeringsskjema for eksisterende tjeneste.
 func (h *ServicesHandler) HandleEdit(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	services, err := h.queries.ListAllServices(r.Context())
+	found, err := h.findService(r.Context(), id)
 	if err != nil {
 		http.Error(w, "databasefeil", http.StatusInternalServerError)
 		return
-	}
-	var found *gen.Service
-	for i := range services {
-		if services[i].ID == id {
-			found = &services[i]
-			break
-		}
 	}
 	if found == nil {
 		http.NotFound(w, r)
@@ -146,41 +147,63 @@ func (h *ServicesHandler) HandleEdit(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = h.editTpl.Execute(w, map[string]interface{}{
 		"IsNew":   false,
-		"Service": *found,
+		"Service": withoutSecrets(*found),
 	})
 }
 
 // HandleUpdate lagrer endringer på eksisterende tjeneste.
 func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := r.ParseMultipartForm(2 << 20); err != nil {
-		_ = r.ParseForm()
+
+	// Les-så-skriv har et lost-update-vindu: felt utenfor skjemaet (for eksempel en secret
+	// som roteres direkte i SQL mellom lesing og skriving) overskrives med den leste verdien.
+	// Akseptert så lenge det finnes én admin.
+	existing, err := h.findService(r.Context(), id)
+	if err != nil {
+		http.Error(w, "databasefeil", http.StatusInternalServerError)
+		return
+	}
+	if existing == nil {
+		// Sjekkes før opplasting, slik at ukjent id ikke etterlater filer i static/.
+		http.NotFound(w, r)
+		return
+	}
+
+	if err := r.ParseMultipartForm(2 << 20); err != nil && !errors.Is(err, http.ErrNotMultipart) {
+		http.Error(w, "ugyldig skjema", http.StatusBadRequest)
+		return
 	}
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
 	if err := validateAuthHost(r.FormValue("auth_host")); err != nil {
-		svc := serviceFromForm(r)
-		svc.ID = id
-		h.renderServiceError(w, svc, false, err.Error())
+		h.renderServiceError(w, overlayForm(*existing, r), false, err.Error())
+		return
+	}
+
+	if strings.TrimSpace(r.FormValue("display_name")) == "" ||
+		strings.TrimSpace(r.FormValue("domain")) == "" ||
+		strings.TrimSpace(r.FormValue("callback_url")) == "" {
+		h.renderServiceError(w, overlayForm(*existing, r), false, "Visningsnavn, domene og callback-URL er påkrevd.")
+		return
+	}
+
+	if err := validateEnforceOrg(r); err != nil {
+		h.renderServiceError(w, overlayForm(*existing, r), false, err.Error())
 		return
 	}
 
 	uploaded, uploadedPath, uploadErr := handleBgImageUpload(r, id)
 	if uploadErr != "" {
-		svc := serviceFromForm(r)
-		svc.ID = id
-		h.renderServiceError(w, svc, false, uploadErr)
+		h.renderServiceError(w, overlayForm(*existing, r), false, uploadErr)
 		return
 	}
 	if uploaded {
 		r.Form.Set("bg_image", uploadedPath)
 	}
 
-	params := buildUpdateParams(r, id, now)
+	params := buildUpdateParams(r, *existing, now)
 	if err := h.queries.UpdateService(r.Context(), params); err != nil {
-		svc := serviceFromForm(r)
-		svc.ID = id
-		h.renderServiceError(w, svc, false, "Databasefeil: "+err.Error())
+		h.renderServiceError(w, overlayForm(*existing, r), false, "Databasefeil: "+err.Error())
 		return
 	}
 
@@ -261,53 +284,51 @@ func handleBgImageUpload(r *http.Request, svcID string) (bool, string, string) {
 // buildCreateParams bygger CreateServiceParams fra HTTP-skjema-verdier.
 func buildCreateParams(r *http.Request, id, now string) gen.CreateServiceParams {
 	return gen.CreateServiceParams{
-		ID:                    id,
-		DisplayName:           r.FormValue("display_name"),
-		Tagline:               nullableStr(r.FormValue("tagline")),
-		Domain:                r.FormValue("domain"),
-		AuthHost:              nullableStr(r.FormValue("auth_host")),
-		CallbackUrl:           r.FormValue("callback_url"),
-		LogoHtml:              nullableStr(r.FormValue("logo_html")),
-		BgImage:               nullableStr(r.FormValue("bg_image")),
-		BgCss:                 nullableStr(r.FormValue("bg_css")),
-		Theme:                 defaultStr(r.FormValue("theme"), "light"),
-		AccentColor:           defaultStr(r.FormValue("accent_color"), "#2563EB"),
-		EmailFromName:         defaultStr(r.FormValue("email_from_name"), id),
-		EmailFromAddress:      nullableStr(r.FormValue("email_from_address")),
-		AutoRegister:          checkboxInt(r, "auto_register"),
-		DefaultRole:           nullableStr(r.FormValue("default_role")),
-		DefaultOrg:            nullableStr(r.FormValue("default_org")),
-		RequireRole:           nullableStr(r.FormValue("require_role")),
-		EnforceOrg:            checkboxInt(r, "enforce_org"),
-		IsDefault:             checkboxInt(r, "is_default"),
-		AuthGoogle:            checkboxInt(r, "auth_google"),
-		AuthMicrosoft:         checkboxInt(r, "auth_microsoft"),
-		AuthMagicLink:         checkboxInt(r, "auth_magic_link"),
-		AuthPassword:          checkboxInt(r, "auth_password"),
-		GoogleClientID:        nullableStr(r.FormValue("google_client_id")),
-		GoogleClientSecret:    nullableStr(r.FormValue("google_client_secret")),
-		MicrosoftClientID:     nullableStr(r.FormValue("microsoft_client_id")),
-		MicrosoftClientSecret: nullableStr(r.FormValue("microsoft_client_secret")),
-		JwtCookieName:         defaultStr(r.FormValue("jwt_cookie_name"), "auth_token"),
-		AccessTokenTtl:        defaultStr(r.FormValue("access_token_ttl"), "PT15M"),
-		RefreshTokenMaxAge:    nullableStr(r.FormValue("refresh_token_max_age")),
-		Active:                checkboxInt(r, "active"),
-		UpdatedAt:             now,
+		ID:                 id,
+		DisplayName:        r.FormValue("display_name"),
+		Tagline:            nullableStr(r.FormValue("tagline")),
+		Domain:             r.FormValue("domain"),
+		AuthHost:           nullableStr(r.FormValue("auth_host")),
+		CallbackUrl:        r.FormValue("callback_url"),
+		LogoHtml:           nullableStr(r.FormValue("logo_html")),
+		BgImage:            nullableStr(r.FormValue("bg_image")),
+		BgCss:              nullableStr(r.FormValue("bg_css")),
+		Theme:              defaultStr(r.FormValue("theme"), "light"),
+		AccentColor:        defaultStr(r.FormValue("accent_color"), "#2563EB"),
+		EmailFromName:      defaultStr(r.FormValue("email_from_name"), id),
+		EmailFromAddress:   nullableStr(r.FormValue("email_from_address")),
+		AutoRegister:       checkboxInt(r, "auto_register"),
+		DefaultRole:        nullableStr(r.FormValue("default_role")),
+		DefaultOrg:         nullableStr(r.FormValue("default_org")),
+		RequireRole:        nullableStr(r.FormValue("require_role")),
+		EnforceOrg:         checkboxInt(r, "enforce_org"),
+		IsDefault:          checkboxInt(r, "is_default"),
+		AuthGoogle:         checkboxInt(r, "auth_google"),
+		AuthMicrosoft:      checkboxInt(r, "auth_microsoft"),
+		AuthMagicLink:      checkboxInt(r, "auth_magic_link"),
+		AuthPassword:       checkboxInt(r, "auth_password"),
+		JwtCookieName:      defaultStr(r.FormValue("jwt_cookie_name"), "auth_token"),
+		AccessTokenTtl:     defaultStr(r.FormValue("access_token_ttl"), "PT15M"),
+		RefreshTokenMaxAge: nullableStr(r.FormValue("refresh_token_max_age")),
+		Active:             checkboxInt(r, "active"),
+		UpdatedAt:          now,
 	}
 }
 
-// buildUpdateParams bygger UpdateServiceParams fra buildCreateParams.
-func buildUpdateParams(r *http.Request, id, now string) gen.UpdateServiceParams {
-	cp := buildCreateParams(r, id, now)
+// buildUpdateParams bygger UpdateServiceParams med den eksisterende raden som baseline.
+// UpdateService skriver alle kolonner, så felt uten skjemainput (google_*, microsoft_*,
+// logo_html, bg_css) må hentes fra raden — ellers nulles de ved hver lagring.
+func buildUpdateParams(r *http.Request, existing gen.Service, now string) gen.UpdateServiceParams {
+	cp := buildCreateParams(r, existing.ID, now)
 	return gen.UpdateServiceParams{
 		DisplayName:           cp.DisplayName,
 		Tagline:               cp.Tagline,
 		Domain:                cp.Domain,
 		AuthHost:              cp.AuthHost,
 		CallbackUrl:           cp.CallbackUrl,
-		LogoHtml:              cp.LogoHtml,
+		LogoHtml:              existing.LogoHtml,
 		BgImage:               cp.BgImage,
-		BgCss:                 cp.BgCss,
+		BgCss:                 existing.BgCss,
 		Theme:                 cp.Theme,
 		AccentColor:           cp.AccentColor,
 		EmailFromName:         cp.EmailFromName,
@@ -322,17 +343,32 @@ func buildUpdateParams(r *http.Request, id, now string) gen.UpdateServiceParams 
 		AuthMicrosoft:         cp.AuthMicrosoft,
 		AuthMagicLink:         cp.AuthMagicLink,
 		AuthPassword:          cp.AuthPassword,
-		GoogleClientID:        cp.GoogleClientID,
-		GoogleClientSecret:    cp.GoogleClientSecret,
-		MicrosoftClientID:     cp.MicrosoftClientID,
-		MicrosoftClientSecret: cp.MicrosoftClientSecret,
+		GoogleClientID:        existing.GoogleClientID,
+		GoogleClientSecret:    existing.GoogleClientSecret,
+		MicrosoftClientID:     existing.MicrosoftClientID,
+		MicrosoftClientSecret: existing.MicrosoftClientSecret,
 		JwtCookieName:         cp.JwtCookieName,
 		AccessTokenTtl:        cp.AccessTokenTtl,
 		RefreshTokenMaxAge:    cp.RefreshTokenMaxAge,
 		Active:                cp.Active,
 		UpdatedAt:             now,
-		ID:                    id,
+		ID:                    existing.ID,
 	}
+}
+
+// findService henter en tjeneste uavhengig av active-flagget. GetServiceByID filtrerer
+// på active = 1, og admin må kunne redigere (og reaktivere) deaktiverte tjenester.
+func (h *ServicesHandler) findService(ctx context.Context, id string) (*gen.Service, error) {
+	services, err := h.queries.ListAllServices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range services {
+		if services[i].ID == id {
+			return &services[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // Hjelpefunksjoner for skjemabehandling — delt mellom auth.go, users.go og services.go.
@@ -386,26 +422,68 @@ func checkboxInt(r *http.Request, name string) int64 {
 	return 0
 }
 
-// serviceFromForm bygger en gen.Service fra skjemafelter for feilrendering.
+// validateEnforceOrg avviser enforce_org uten default_org. checkPolicy (internal/auth/google.go)
+// krever DefaultOrg != nil, så kombinasjonen ville slått av org-håndhevingen uten varsel.
+func validateEnforceOrg(r *http.Request) error {
+	if checkboxInt(r, "enforce_org") == 1 && nullableStr(r.FormValue("default_org")) == nil {
+		return fmt.Errorf("Krev org-samsvar (enforce_org) forutsetter en standard org. Fyll ut standard org eller fjern avkryssingen.")
+	}
+	return nil
+}
+
+// serviceFromForm bygger en gen.Service fra alle skjemafelt for feilrendering.
 func serviceFromForm(r *http.Request) gen.Service {
 	return gen.Service{
-		ID:               r.FormValue("id"),
-		DisplayName:      r.FormValue("display_name"),
-		Domain:           r.FormValue("domain"),
-		EmailFromAddress: nullableStr(r.FormValue("email_from_address")),
-		CallbackUrl:      r.FormValue("callback_url"),
-		AccentColor:      defaultStr(r.FormValue("accent_color"), "#2563EB"),
-		Theme:            defaultStr(r.FormValue("theme"), "light"),
-		JwtCookieName:    defaultStr(r.FormValue("jwt_cookie_name"), "auth_token"),
-		AccessTokenTtl:   defaultStr(r.FormValue("access_token_ttl"), "PT15M"),
-		Active:           checkboxInt(r, "active"),
-		AuthGoogle:       checkboxInt(r, "auth_google"),
-		AuthMagicLink:    checkboxInt(r, "auth_magic_link"),
-		AuthMicrosoft:    checkboxInt(r, "auth_microsoft"),
-		AuthPassword:     checkboxInt(r, "auth_password"),
-		IsDefault:        checkboxInt(r, "is_default"),
-		AutoRegister:     checkboxInt(r, "auto_register"),
+		ID:                 r.FormValue("id"),
+		DisplayName:        r.FormValue("display_name"),
+		Tagline:            nullableStr(r.FormValue("tagline")),
+		Domain:             r.FormValue("domain"),
+		AuthHost:           nullableStr(r.FormValue("auth_host")),
+		EmailFromName:      r.FormValue("email_from_name"),
+		EmailFromAddress:   nullableStr(r.FormValue("email_from_address")),
+		CallbackUrl:        r.FormValue("callback_url"),
+		BgImage:            nullableStr(r.FormValue("bg_image")),
+		AccentColor:        defaultStr(r.FormValue("accent_color"), "#2563EB"),
+		Theme:              defaultStr(r.FormValue("theme"), "light"),
+		JwtCookieName:      defaultStr(r.FormValue("jwt_cookie_name"), "auth_token"),
+		AccessTokenTtl:     defaultStr(r.FormValue("access_token_ttl"), "PT15M"),
+		RefreshTokenMaxAge: nullableStr(r.FormValue("refresh_token_max_age")),
+		DefaultRole:        nullableStr(r.FormValue("default_role")),
+		DefaultOrg:         nullableStr(r.FormValue("default_org")),
+		RequireRole:        nullableStr(r.FormValue("require_role")),
+		EnforceOrg:         checkboxInt(r, "enforce_org"),
+		Active:             checkboxInt(r, "active"),
+		AuthGoogle:         checkboxInt(r, "auth_google"),
+		AuthMagicLink:      checkboxInt(r, "auth_magic_link"),
+		AuthMicrosoft:      checkboxInt(r, "auth_microsoft"),
+		AuthPassword:       checkboxInt(r, "auth_password"),
+		IsDefault:          checkboxInt(r, "is_default"),
+		AutoRegister:       checkboxInt(r, "auto_register"),
 	}
+}
+
+// withoutSecrets nuller client id/secret i strukturen som går til malen, slik at et
+// fremtidig malfelt ikke kan lekke dem. Skriving bruker den uavkortede raden.
+func withoutSecrets(s gen.Service) gen.Service {
+	s.GoogleClientID, s.GoogleClientSecret = nil, nil
+	s.MicrosoftClientID, s.MicrosoftClientSecret = nil, nil
+	return s
+}
+
+// overlayForm legger skjemaverdiene over den eksisterende raden, slik at feilsiden ved
+// update beholder felt som ikke kommer fra skjemaet. Raden og dens id er autoritativ.
+func overlayForm(existing gen.Service, r *http.Request) gen.Service {
+	f := serviceFromForm(r)
+	f.ID = existing.ID
+	out := withoutSecrets(existing)
+	out.DisplayName, out.Tagline, out.Domain, out.AuthHost = f.DisplayName, f.Tagline, f.Domain, f.AuthHost
+	out.EmailFromName, out.EmailFromAddress, out.CallbackUrl, out.BgImage = f.EmailFromName, f.EmailFromAddress, f.CallbackUrl, f.BgImage
+	out.AccentColor, out.Theme, out.JwtCookieName = f.AccentColor, f.Theme, f.JwtCookieName
+	out.AccessTokenTtl, out.RefreshTokenMaxAge = f.AccessTokenTtl, f.RefreshTokenMaxAge
+	out.DefaultRole, out.DefaultOrg, out.RequireRole, out.EnforceOrg = f.DefaultRole, f.DefaultOrg, f.RequireRole, f.EnforceOrg
+	out.Active, out.AuthGoogle, out.AuthMagicLink, out.AuthMicrosoft = f.Active, f.AuthGoogle, f.AuthMagicLink, f.AuthMicrosoft
+	out.AuthPassword, out.IsDefault, out.AutoRegister = f.AuthPassword, f.IsDefault, f.AutoRegister
+	return out
 }
 
 func (h *ServicesHandler) renderServiceError(w http.ResponseWriter, svc gen.Service, isNew bool, errMsg string) {

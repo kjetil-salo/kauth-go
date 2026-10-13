@@ -145,6 +145,15 @@
             <label>Standard rolle</label>
             <input type="text" name="default_role" value="{{if .Service.DefaultRole}}{{.Service.DefaultRole}}{{end}}">
         </div>
+        <div class="form-group">
+            <label>Påkrevd rolle</label>
+            <input type="text" name="require_role" value="{{if .Service.RequireRole}}{{.Service.RequireRole}}{{end}}">
+            <p class="hint">Én rolle som brukeren må ha. Tomt = ingen rollekrav.</p>
+        </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="enforce_org" name="enforce_org" value="1" {{if eq .Service.EnforceOrg 1}}checked{{end}}>
+            <label for="enforce_org">Krev at brukerens org samsvarer med standard org</label>
+        </div>
         <div class="checkbox-row">
             <input type="checkbox" id="auto_register" name="auto_register" value="1" {{if eq .Service.AutoRegister 1}}checked{{end}}>
             <label for="auto_register">Auto-registrer nye OIDC-brukere</label>
