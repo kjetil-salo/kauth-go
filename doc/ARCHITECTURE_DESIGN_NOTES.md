@@ -45,3 +45,25 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 
 **Konsekvens:** Selve oppsettet holdes lokalt og er ikke en del av det offentlige repoet. Det gjelder hooks, skills, driver- og eval-skript, analyse- og plandokumenter og holdout-scenarier. Bare beslutningsloggen, ROADMAP og BACKLOG er sporet. Holdout-scenariene beskriver dessuten sårbarheter i detalj før de er rettet.
 
+---
+
+## ADN 9 — Tokenformål og tjenestebinding håndheves av kauth, ikke av URL-en eller klienten (2026-10-13)
+
+**Status:** Godkjent (analyse 2026-10-13)
+→ Analyse: [doc/features/007_AN_AKUTT_HERDING.md](features/007_AN_AKUTT_HERDING.md)
+
+**Beslutning:**
+1. **`Verify` krever forventet formål.** Kallere oppgir hvilken `token_use` de forventer (og `aud` der den finnes). Ingen endepunkter godtar et «gyldig kauth-JWT» generelt. Admin-tokens får `aud=kauth-admin` med én gang. `aud` på access-tokens kommer i Fase 1 (H5, i tråd med ADN 5).
+2. **En sesjon opprettes bare der autentiseringen skjedde.** Admin-sesjonen settes i OIDC-callbacken (formålet ligger i den HMAC-signerte staten) eller i magic link-verifiseringen. Den lages aldri ved å veksle et token fra en URL.
+3. **Refresh-tokenets lagrede tjeneste er autoritativ.** `service_id` fra klienten er bare et hint. I Fase 0 blir avvik logget og ignorert, i Fase 1 avvist. Policy (`require_role`/`enforce_org`) kjøres ved hver refresh mot den lagrede tjenesten. Rader uten tjeneste avvises.
+4. **Redirect-mål er eksakte registrerte URL-er.** Det finnes ingen unntak for interne stier.
+5. **Tokens skal aldri i loggen.** Request-loggen hvitelister felt (sti, aldri query), slik at nye parametere ikke kan lekke.
+6. **Innstramminger som kan bryte klienter, innføres med logging først** (L4 og H2-avvik i Fase 0) og håndheves når dataene viser at det er trygt.
+7. **Nettverksgrensen er loopback.** Kauth lytter på 127.0.0.1, og klient-IP hentes fra `CF-Connecting-IP` bare når forbindelsen kommer fra loopback.
+
+**Begrunnelse:** Verifiseringen 2026-10-13 (ROADMAP K1, K2, H2) viste at tre uavhengige feil hadde samme rot: kauth stolte på det URL-en eller klienten påsto (et vilkårlig JWT i `?token=`, en `service_id` i skjemaet, en intern sti i en usignert cookie) i stedet for på sin egen tilstand. ADN 5 fra Quarkus-versjonen sa allerede at refresh skal bindes til `service_id`. Porten mistet det. Å lukke hver feil for seg, uten et prinsipp, inviterer til neste variant.
+
+**Konsekvens:**
+- Aktive admin-sesjoner må logge inn på nytt én gang når `aud=kauth-admin` innføres.
+- Ingen nye kolonner. Klientenes tokens er uendret i Fase 0.
+- Fase 1 bygger videre med `aud` på alle tokens, avvisning av `service_id`-avvik, eventuelt håndheving av L4, og CSRF-vern som tar høyde for at `Referrer-Policy: no-referrer` gir `Origin: null` på skjema-POST.
