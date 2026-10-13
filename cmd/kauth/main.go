@@ -98,9 +98,11 @@ func main() {
 
 	// Global middleware
 	r.Use(chimiddleware.RealIP)
-	r.Use(chimiddleware.Logger)
 	r.Use(chimiddleware.Recoverer)
 	r.Use(auth.ClientIPMiddleware)
+	// Etter ClientIPMiddleware (logger bruker ClientIP) og innenfor Recoverer
+	// (panikk gir fortsatt logglinje).
+	r.Use(auth.RequestLogger(slog.Default()))
 
 	// Statiske filer
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
@@ -126,7 +128,7 @@ func main() {
 
 	// ── Microsoft OIDC ────────────────────────────────────────────────────────
 	r.Get("/ms-oidc-login", msH.InitiateLogin)
-		r.Get("/ms-social-login", msH.InitiateLogin)
+	r.Get("/ms-social-login", msH.InitiateLogin)
 	r.Get("/ms-callback", msH.HandleCallback)
 
 	// ── Magic link ────────────────────────────────────────────────────────────
