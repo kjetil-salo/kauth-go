@@ -69,3 +69,26 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 - Fase 1 bygger videre med `aud` på alle tokens, avvisning av `service_id`-avvik, eventuelt håndheving av L4, og CSRF-vern som tar høyde for at `Referrer-Policy: no-referrer` gir `Origin: null` på skjema-POST.
 
 **Tillegg (2026-10-13, fra 007 F5):** Kauth sender `Referrer-Policy: no-referrer`. Derfor sender nettleseren `Origin: null` på kauths egne skjema-POST-er. CSRF-vern for admin og andre skjemaer (Fase 1) skal bruke `Sec-Fetch-Site: same-origin` eller et CSRF-token, ikke Origin. `Origin: null` skal aldri godtas. Origin-sjekken på `/token` (007 F7) påvirkes ikke, fordi den kalles fra appenes egne sider.
+
+---
+
+## ADN 10 — Føderert identitet krever leverandørbekreftet e-post, og refresh-familier revokeres som helhet (2026-10-13)
+
+**Status:** Foreslått
+→ Analyse: [doc/features/008_AN_HERD_FLYTER.md](features/008_AN_HERD_FLYTER.md)
+
+**Beslutning:**
+1. **E-post fra en leverandør brukes bare når leverandøren har bekreftet den.** Google: `email_verified == true`, i alle grener. Microsoft: en personlig konto gjenkjennes bare på `tid == 9188040d-6c67-4c5b-b112-36a304b66dad`. En organisasjonskonto krever `xms_edov == true`. Et manglende claim tolkes aldri som «personlig konto». Det er ingen fallback til `preferred_username`. `iss` valideres mot `tid`.
+2. **Den signerte OIDC-staten bærer nonce og utstedelsestid.** Nonce sendes til leverandøren og sjekkes mot `id_token.nonce`. En state eldre enn 10 minutter avvises. Det blir ingen ny tilstand på serveren.
+3. **Feil i føderert innlogging gir en generisk feilkode på innloggingssiden, aldri feiltekst fra biblioteket og aldri en automatisk ny runde mot leverandøren.** Årsaken går til audit og logg.
+4. **En refresh-familie er enheten for tilbaketrekking.** Rotasjonen (konsum + barn) er én transaksjon. Gjenbruk eller presentasjon av et revokert token revokerer hele familien uansett `used`. Logout revokerer familien til cookien, og deaktivering revokerer alle familiene til brukeren.
+5. **Ingen toleransevindu for samtidig refresh.** Prod-data (17 reuse, 11 av dem samtidige kall fra klarsyn før klientens single-flight-fiks 2026-07-28, 0 reuse på 1 406 rotasjoner siden 2026-08-18) viser at problemet er løst hos klienten. Reuse-audit får tidsgap, slik at et vindu kan innføres på data hvis behovet kommer tilbake.
+6. **Avvisning av `service_id`-avvik ved refresh (ADN 9 pkt 3) utsettes.** Den lagrede tjenesten er allerede autoritativ, så avvisning tetter ingen hull. Datagrunnlaget (4 rotasjoner) er for tynt til å utelukke legitime klienter.
+
+**Begrunnelse:** ADN 7 sier at kauth eier identiteten. Da må kauth også eie beslutningen om *hvilke* påstander fra en leverandør som er gode nok til å bli identitet. Uten den kan e-post fra en fremmed Entra-tenant ta over en eksisterende konto (nOAuth, ROADMAP H4). For refresh sier OAuth Security BCP (RFC 9700 §4.14.2) at gjenbruk skal ugyldiggjøre den aktive tokenen. Det holder bare hvis rotasjonen er atomisk og revokeringen treffer hele familien (ROADMAP H6). At logout ikke revokerte noe, var et tap fra Quarkus-porten: de 115 `user_logout`-revokeringene i prod er alle fra mai 2026, før kauth-go fantes.
+
+**Konsekvens:**
+- `xms_edov` må konfigureres som optional claim i begge Entra-appene (`bcc08970-…` «Klarsyn» og `6e5fb3bf-…` for spekto/spekto-dev) før håndhevingen deployes. Ellers avvises organisasjonskontoer (0 i prod i dag).
+- Ingen migrasjon og ingen endring i tokens eller claims. Innlogginger som pågår rundt deploy, feiler én gang.
+- Et ekte refresh-race logger nå ut begge parter i stedet for tilfeldig den ene.
+- Varig identitet på `(tid, oid)` og `tid`-allowlist per tjeneste kommer i Fase 2/5 (ROADMAP B1, B5).
