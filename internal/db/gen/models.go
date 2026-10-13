@@ -30,6 +30,7 @@ type AuthorizationCode struct {
 	CreatedAt           string  `json:"created_at"`
 	ExpiresAt           string  `json:"expires_at"`
 	Used                int64   `json:"used"`
+	FamilyID            *string `json:"family_id"`
 }
 
 type MagicToken struct {
@@ -41,6 +42,7 @@ type MagicToken struct {
 	CreatedAt   string  `json:"created_at"`
 	ExpiresAt   string  `json:"expires_at"`
 	Used        int64   `json:"used"`
+	Purpose     string  `json:"purpose"`
 }
 
 type RefreshToken struct {

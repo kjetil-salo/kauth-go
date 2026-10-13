@@ -141,7 +141,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		}
 		expiresAt := time.Now().UTC().Add(60 * time.Second).Format("2006-01-02T15:04:05Z")
 		err = h.Queries.InsertAuthorizationCode(r.Context(), gen.InsertAuthorizationCodeParams{
-			Code:                code,
+			Code:                token.HashOpaque(code),
 			ServiceID:           oidcReq.ClientID,
 			Email:               claims.Email,
 			RedirectUri:         oidcReq.RedirectURI,

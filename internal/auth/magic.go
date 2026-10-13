@@ -169,10 +169,11 @@ func (h *MagicHandlers) RequestLink(w http.ResponseWriter, r *http.Request) {
 	// selve redirect-etter-innlogging dekkes av redirect_uri-cookien satt
 	// klientside i login.html (samme mekanisme som Google/Microsoft-flyten).
 	if err := h.queries.InsertMagicToken(r.Context(), gen.InsertMagicTokenParams{
-		Token:       plainToken,
+		Token:       token.HashOpaque(plainToken),
 		Email:       email,
 		ServiceID:   &serviceID,
 		RedirectUri: nil,
+		Purpose:     token.MagicPurposeService,
 		ExpiresAt:   now.Add(15 * time.Minute).Format(time.RFC3339),
 		CreatedAt:   now.Format(time.RFC3339),
 	}); err != nil {
@@ -221,8 +222,9 @@ func (h *MagicHandlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
 	t := i18n.Get(locale)
 
 	magic, err := h.queries.ConsumeMagicToken(r.Context(), gen.ConsumeMagicTokenParams{
-		Token:     chi.URLParam(r, "token"),
-		ExpiresAt: time.Now().UTC().Format(time.RFC3339),
+		TokenHash: token.HashOpaque(chi.URLParam(r, "token")),
+		Purpose:   token.MagicPurposeService,
+		Now:       time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		// Brukertilstand, ikke serverfeil: send tilbake til skjemaet med oversatt

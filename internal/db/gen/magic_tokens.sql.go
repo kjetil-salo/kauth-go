@@ -12,17 +12,18 @@ import (
 const consumeMagicToken = `-- name: ConsumeMagicToken :one
 UPDATE magic_tokens
 SET used = 1
-WHERE token = ? AND used = 0 AND expires_at > ?
-RETURNING id, token, email, service_id, redirect_uri, created_at, expires_at, used
+WHERE token = ?1 AND purpose = ?2 AND used = 0 AND expires_at > ?3
+RETURNING id, token, email, service_id, redirect_uri, created_at, expires_at, used, purpose
 `
 
 type ConsumeMagicTokenParams struct {
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
+	TokenHash string `json:"token_hash"`
+	Purpose   string `json:"purpose"`
+	Now       string `json:"now"`
 }
 
 func (q *Queries) ConsumeMagicToken(ctx context.Context, arg ConsumeMagicTokenParams) (MagicToken, error) {
-	row := q.db.QueryRowContext(ctx, consumeMagicToken, arg.Token, arg.ExpiresAt)
+	row := q.db.QueryRowContext(ctx, consumeMagicToken, arg.TokenHash, arg.Purpose, arg.Now)
 	var i MagicToken
 	err := row.Scan(
 		&i.ID,
@@ -33,6 +34,7 @@ func (q *Queries) ConsumeMagicToken(ctx context.Context, arg ConsumeMagicTokenPa
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.Used,
+		&i.Purpose,
 	)
 	return i, err
 }
@@ -53,9 +55,37 @@ func (q *Queries) DeleteExpiredMagicTokens(ctx context.Context, arg DeleteExpire
 	return err
 }
 
+const getValidMagicTokenByHash = `-- name: GetValidMagicTokenByHash :one
+SELECT id, token, email, service_id, redirect_uri, created_at, expires_at, used, purpose FROM magic_tokens
+WHERE token = ?1 AND purpose = ?2 AND used = 0 AND expires_at > ?3
+`
+
+type GetValidMagicTokenByHashParams struct {
+	TokenHash string `json:"token_hash"`
+	Purpose   string `json:"purpose"`
+	Now       string `json:"now"`
+}
+
+func (q *Queries) GetValidMagicTokenByHash(ctx context.Context, arg GetValidMagicTokenByHashParams) (MagicToken, error) {
+	row := q.db.QueryRowContext(ctx, getValidMagicTokenByHash, arg.TokenHash, arg.Purpose, arg.Now)
+	var i MagicToken
+	err := row.Scan(
+		&i.ID,
+		&i.Token,
+		&i.Email,
+		&i.ServiceID,
+		&i.RedirectUri,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.Used,
+		&i.Purpose,
+	)
+	return i, err
+}
+
 const insertMagicToken = `-- name: InsertMagicToken :exec
-INSERT INTO magic_tokens (token, email, service_id, redirect_uri, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO magic_tokens (token, email, service_id, redirect_uri, purpose, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertMagicTokenParams struct {
@@ -63,6 +93,7 @@ type InsertMagicTokenParams struct {
 	Email       string  `json:"email"`
 	ServiceID   *string `json:"service_id"`
 	RedirectUri *string `json:"redirect_uri"`
+	Purpose     string  `json:"purpose"`
 	CreatedAt   string  `json:"created_at"`
 	ExpiresAt   string  `json:"expires_at"`
 }
@@ -73,8 +104,46 @@ func (q *Queries) InsertMagicToken(ctx context.Context, arg InsertMagicTokenPara
 		arg.Email,
 		arg.ServiceID,
 		arg.RedirectUri,
+		arg.Purpose,
 		arg.CreatedAt,
 		arg.ExpiresAt,
 	)
 	return err
+}
+
+const insertMagicTokenLimited = `-- name: InsertMagicTokenLimited :execrows
+INSERT INTO magic_tokens (token, email, service_id, redirect_uri, purpose, created_at, expires_at)
+SELECT CAST(?1 AS TEXT), CAST(?2 AS TEXT), ?3, ?4, CAST(?5 AS TEXT), CAST(?6 AS TEXT), CAST(?7 AS TEXT)
+WHERE (
+    SELECT COUNT(*) FROM magic_tokens
+    WHERE magic_tokens.email = ?2 AND magic_tokens.purpose = ?5 AND magic_tokens.created_at > ?8
+) < 3
+`
+
+type InsertMagicTokenLimitedParams struct {
+	TokenHash   string  `json:"token_hash"`
+	Email       string  `json:"email"`
+	ServiceID   *string `json:"service_id"`
+	RedirectUri *string `json:"redirect_uri"`
+	Purpose     string  `json:"purpose"`
+	CreatedAt   string  `json:"created_at"`
+	ExpiresAt   string  `json:"expires_at"`
+	WindowStart string  `json:"window_start"`
+}
+
+func (q *Queries) InsertMagicTokenLimited(ctx context.Context, arg InsertMagicTokenLimitedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, insertMagicTokenLimited,
+		arg.TokenHash,
+		arg.Email,
+		arg.ServiceID,
+		arg.RedirectUri,
+		arg.Purpose,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+		arg.WindowStart,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

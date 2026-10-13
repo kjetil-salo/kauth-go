@@ -44,7 +44,20 @@ func TestMagicVerifyToken_PurposeBinding(t *testing.T) {
 	svcID := "klarsyn"
 	for tok, sid := range map[string]*string{"tjeneste-tok": &svcID, "admin-tok": nil} {
 		require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-			Token: tok, Email: "konge@example.com", ServiceID: sid,
+			Token: token.HashOpaque(tok), Purpose: purposeFor(sid), Email: "konge@example.com", ServiceID: sid,
+			CreatedAt: nowStr, ExpiresAt: now.Add(15 * time.Minute).Format(time.RFC3339),
+		}))
+	}
+
+	// Motstridende rader: purpose og service_id peker hver sin vei. Go-vakten
+	// på ServiceID må avvise service-formål uten tjeneste selv om SQL slipper den
+	// gjennom, og admin-formål med tjeneste treffer aldri tjenestestien.
+	for tok, row := range map[string]struct {
+		purpose string
+		sid     *string
+	}{"service-uten-tjeneste": {token.MagicPurposeService, nil}, "admin-med-tjeneste": {token.MagicPurposeAdmin, &svcID}} {
+		require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
+			Token: token.HashOpaque(tok), Purpose: row.purpose, Email: "konge@example.com", ServiceID: row.sid,
 			CreatedAt: nowStr, ExpiresAt: now.Add(15 * time.Minute).Format(time.RFC3339),
 		}))
 	}
@@ -73,8 +86,22 @@ func TestMagicVerifyToken_PurposeBinding(t *testing.T) {
 	require.Contains(t, w.Header().Get("Location"), "error=expired")
 	require.Empty(t, w.Result().Cookies())
 
+	for _, tok := range []string{"service-uten-tjeneste", "admin-med-tjeneste"} {
+		w = call(tok)
+		require.Equal(t, http.StatusFound, w.Code, tok)
+		require.Contains(t, w.Header().Get("Location"), "error=expired", tok)
+		require.Empty(t, w.Result().Cookies(), tok)
+	}
+
 	// Tjeneste-token: fortsatt vanlig innlogging.
 	w = call("tjeneste-tok")
 	require.Equal(t, http.StatusFound, w.Code)
 	require.True(t, strings.HasPrefix(w.Header().Get("Location"), "/dispatch?"), w.Header().Get("Location"))
+}
+
+func purposeFor(serviceID *string) string {
+	if serviceID == nil {
+		return token.MagicPurposeAdmin
+	}
+	return token.MagicPurposeService
 }

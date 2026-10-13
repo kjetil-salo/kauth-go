@@ -3,7 +3,6 @@ package token
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -87,11 +86,6 @@ func generatePlainToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func hashToken(plain string) string {
-	s := sha256.Sum256([]byte(plain))
-	return hex.EncodeToString(s[:])
-}
-
 func generateFamilyID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -144,7 +138,7 @@ func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Servi
 
 	svcID := svc.ID
 	if err := s.db.InsertRefreshToken(ctx, gen.InsertRefreshTokenParams{
-		TokenHash:       hashToken(plain),
+		TokenHash:       HashOpaque(plain),
 		Email:           user.Email,
 		ServiceID:       &svcID,
 		FamilyID:        familyID,
@@ -162,7 +156,7 @@ func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Servi
 }
 
 func (s *RefreshService) Rotate(ctx context.Context, plainToken, ip, ua string) (*RotationResult, error) {
-	hash := hashToken(plainToken)
+	hash := HashOpaque(plainToken)
 	now := time.Now().UTC()
 
 	// Konsum og innsetting av barnet må være atomisk: feiler innsettingen, skal
@@ -191,7 +185,7 @@ func (s *RefreshService) Rotate(ctx context.Context, plainToken, ip, ua string) 
 		}
 		parentID := consumed.ID
 		if err := q.InsertRefreshToken(ctx, gen.InsertRefreshTokenParams{
-			TokenHash:       hashToken(newPlain),
+			TokenHash:       HashOpaque(newPlain),
 			Email:           consumed.Email,
 			ServiceID:       consumed.ServiceID,
 			FamilyID:        consumed.FamilyID,
@@ -331,7 +325,7 @@ func (s *RefreshService) RevokeFamily(ctx context.Context, familyID, reason stri
 func (s *RefreshService) RevokeFamilyOfToken(ctx context.Context, plain, reason string) (email, serviceID string, ok bool) {
 	// WithoutCancel: en frakobling midt i utloggingen skal ikke etterlate en levende familie.
 	ctx = context.WithoutCancel(ctx)
-	row, err := s.db.GetRefreshTokenByHash(ctx, hashToken(plain))
+	row, err := s.db.GetRefreshTokenByHash(ctx, HashOpaque(plain))
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			slog.Error("logout: oppslag av refresh-token feilet", "err", err)

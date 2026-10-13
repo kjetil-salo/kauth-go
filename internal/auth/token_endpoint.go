@@ -51,7 +51,7 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	row, err := h.queries.ConsumeAuthorizationCode(r.Context(), gen.ConsumeAuthorizationCodeParams{
-		Code:      code,
+		Code:      token.HashOpaque(code),
 		ExpiresAt: now,
 	})
 	if err != nil {

@@ -80,7 +80,7 @@ func insertAuthCode(t *testing.T, q *gen.Queries, code, email, redirectURI, chal
 		noncePtr = &nonce
 	}
 	require.NoError(t, q.InsertAuthorizationCode(context.Background(), gen.InsertAuthorizationCodeParams{
-		Code: code, ServiceID: "veivakt", Email: email, RedirectUri: redirectURI,
+		Code: token.HashOpaque(code), ServiceID: "veivakt", Email: email, RedirectUri: redirectURI,
 		CodeChallenge: challenge, CodeChallengeMethod: method, Scope: scopePtr, Nonce: noncePtr,
 		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z"), ExpiresAt: expiresAt,
 	}))

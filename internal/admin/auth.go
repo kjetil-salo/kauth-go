@@ -138,10 +138,11 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 	now := time.Now().UTC()
 	expiresAt := now.Add(15 * time.Minute)
 	err = h.queries.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-		Token:       rawToken,
+		Token:       token.HashOpaque(rawToken),
 		Email:       email,
 		ServiceID:   nil,
 		RedirectUri: nil,
+		Purpose:     token.MagicPurposeAdmin,
 		CreatedAt:   now.Format("2006-01-02T15:04:05Z"),
 		ExpiresAt:   expiresAt.Format("2006-01-02T15:04:05Z"),
 	})
@@ -180,8 +181,9 @@ func (h *AuthHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
 	mt, err := h.queries.ConsumeMagicToken(ctx, gen.ConsumeMagicTokenParams{
-		Token:     rawToken,
-		ExpiresAt: now,
+		TokenHash: token.HashOpaque(rawToken),
+		Purpose:   token.MagicPurposeAdmin,
+		Now:       now,
 	})
 	if err != nil {
 		h.auditor.Log(ctx, audit.Event{

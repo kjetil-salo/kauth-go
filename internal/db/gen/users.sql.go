@@ -76,7 +76,7 @@ func (q *Queries) DeactivateUser(ctx context.Context, arg DeactivateUserParams) 
 }
 
 const getActiveUserByEmail = `-- name: GetActiveUserByEmail :one
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users WHERE email = ? AND deactivated_at IS NULL LIMIT 1
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users WHERE lower(trim(email)) = lower(trim(?1)) AND deactivated_at IS NULL LIMIT 1
 `
 
 func (q *Queries) GetActiveUserByEmail(ctx context.Context, email string) (User, error) {
@@ -97,7 +97,7 @@ func (q *Queries) GetActiveUserByEmail(ctx context.Context, email string) (User,
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users WHERE email = ? LIMIT 1
+SELECT id, email, password_hash, name, roles, orgs, created_at, last_login, deactivated_at FROM users WHERE lower(trim(email)) = lower(trim(?1)) LIMIT 1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {

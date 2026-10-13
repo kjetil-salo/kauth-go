@@ -57,4 +57,4 @@ func StubTxRunner(q RefreshQuerier) TxRunner {
 }
 
 // HashForTest eksponerer token-hashen slik at tester kan slå opp rader.
-func HashForTest(plain string) string { return hashToken(plain) }
+func HashForTest(plain string) string { return HashOpaque(plain) }

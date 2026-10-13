@@ -100,7 +100,7 @@ func TestMagicLinkVerify_RejectsUserWithoutRequiredRole(t *testing.T) {
 
 	plainToken := "test-magic-token-12345"
 	require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-		Token: plainToken, Email: user.Email, ServiceID: strPtrCP("restricted"),
+		Token: token.HashOpaque(plainToken), Purpose: token.MagicPurposeService, Email: user.Email, ServiceID: strPtrCP("restricted"),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		ExpiresAt: time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339),
 	}))
