@@ -130,3 +130,61 @@ func TestLoad_CORSOrigins_Normalisering(t *testing.T) {
 		assert.Equal(t, []string{"http://localhost:3000"}, c.CORSOrigins)
 	})
 }
+
+func TestParseHTTPAddr_Default(t *testing.T) {
+	a, err := parseHTTPAddr("", false)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1", a)
+}
+
+func TestParseHTTPAddr_Valid(t *testing.T) {
+	for _, in := range []string{"127.0.0.1", "::1", "0.0.0.0", "::", "192.168.1.10"} {
+		a, err := parseHTTPAddr(in, true)
+		require.NoError(t, err, in)
+		assert.Equal(t, in, a)
+	}
+}
+
+func TestParseHTTPAddr_Invalid(t *testing.T) {
+	for _, in := range []string{"fe80::1%eth0", "localhost", "example.com", "", "   ", " 127.0.0.1", "1.2.3.4:80", "[::1]:80", "999.1.1.1"} {
+		_, err := parseHTTPAddr(in, true)
+		require.Error(t, err, "%q", in)
+		assert.Contains(t, err.Error(), "KAUTH_HTTP_ADDR")
+	}
+}
+
+func TestParseHTTPAddr_UnmapsIPv4Mapped(t *testing.T) {
+	a, err := parseHTTPAddr("::ffff:127.0.0.1", true)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1", a)
+}
+
+func TestListenAddr(t *testing.T) {
+	assert.Equal(t, "[::1]:8083", ListenAddr("::1", "8083"))
+	assert.Equal(t, "127.0.0.1:8083", ListenAddr("127.0.0.1", "8083"))
+}
+
+func TestLoad_HTTPAddr(t *testing.T) {
+	t.Run("uset gir loopback", func(t *testing.T) {
+		setMinimalEnv(t)
+		// t.Setenv først for å få gjenoppretting, deretter faktisk unset.
+		t.Setenv("KAUTH_HTTP_ADDR", "")
+		os.Unsetenv("KAUTH_HTTP_ADDR")
+		c, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1", c.HTTPAddr)
+	})
+	t.Run("ugyldig gir oppstartsfeil", func(t *testing.T) {
+		setMinimalEnv(t)
+		t.Setenv("KAUTH_HTTP_ADDR", "localhost")
+		_, err := Load()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "KAUTH_HTTP_ADDR")
+	})
+	t.Run("blank gir oppstartsfeil", func(t *testing.T) {
+		setMinimalEnv(t)
+		t.Setenv("KAUTH_HTTP_ADDR", "  ")
+		_, err := Load()
+		require.Error(t, err)
+	})
+}

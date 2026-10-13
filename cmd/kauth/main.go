@@ -192,7 +192,7 @@ func main() {
 
 	// ── 11. Start HTTP-server med graceful shutdown ───────────────────────────
 	srv := &http.Server{
-		Addr:              ":" + cfg.HTTPPort,
+		Addr:              config.ListenAddr(cfg.HTTPAddr, cfg.HTTPPort),
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -202,7 +202,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("kauth lytter på :%s (issuer: %s)\n", cfg.HTTPPort, cfg.Issuer)
+		fmt.Printf("kauth lytter på %s (issuer: %s)\n", srv.Addr, cfg.Issuer)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

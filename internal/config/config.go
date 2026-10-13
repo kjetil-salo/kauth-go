@@ -7,6 +7,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -50,6 +52,9 @@ type Config struct {
 	// slås på ved en feiltakelse i en tjenesterad alene.
 	PasswordLoginEnabled bool
 
+	// HTTPAddr er en IP-literal. Default er loopback slik at kauth ikke er
+	// nåbar fra LAN uten eksplisitt valg (0.0.0.0 / ::).
+	HTTPAddr    string
 	HTTPPort    string
 	CORSOrigins []string
 	LogLevel    string
@@ -185,6 +190,11 @@ func Load() (*Config, error) {
 	}
 
 	c.HTTPPort = optional("KAUTH_HTTP_PORT", "8080")
+	addr, err := parseHTTPAddr(os.LookupEnv("KAUTH_HTTP_ADDR"))
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	c.HTTPAddr = addr
 	c.LogLevel = optional("KAUTH_LOG_LEVEL", "info")
 
 	if cors := os.Getenv("KAUTH_CORS_ORIGINS"); cors != "" {
@@ -206,6 +216,28 @@ func Load() (*Config, error) {
 		return nil, errors.New("konfigurasjonsfeil:\n  - " + strings.Join(errs, "\n  - "))
 	}
 	return c, nil
+}
+
+// parseHTTPAddr godtar kun en ren IP-literal. Vertsnavn avvises fordi
+// oppslag kan gi en annen adresse enn operatøren tror, og port hører til
+// KAUTH_HTTP_PORT. Satt-men-blank er en feil, ikke "bruk default", slik at
+// en skrivefeil i miljøfilen ikke stille gir en annen eksponering.
+func parseHTTPAddr(v string, set bool) (string, error) {
+	if !set {
+		return "127.0.0.1", nil
+	}
+	ip, err := netip.ParseAddr(v)
+	// Zone-ID binder til ett grensesnitt og gjør adressen uforutsigbar mellom maskiner.
+	if err != nil || ip.Zone() != "" {
+		return "", fmt.Errorf("ugyldig KAUTH_HTTP_ADDR %q: må være en IP-adresse uten port, zone eller vertsnavn (f.eks. 127.0.0.1, ::1, 0.0.0.0)", v)
+	}
+	// ::ffff:127.0.0.1 skal oppføre seg (og logges) som 127.0.0.1.
+	return ip.Unmap().String(), nil
+}
+
+// ListenAddr bygger host:port med riktig hakeparentes-håndtering for IPv6.
+func ListenAddr(host, port string) string {
+	return net.JoinHostPort(host, port)
 }
 
 func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
