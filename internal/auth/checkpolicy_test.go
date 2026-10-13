@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 
@@ -73,7 +74,7 @@ func TestDoLogin_RejectsUserWithoutRequiredRole(t *testing.T) {
 	refSvc := token.NewRefreshService(q, aud)
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(ctx))
-	h := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud)
+	h := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud, true)
 
 	form := url.Values{"email": {user.Email}, "password": {"hunter2"}, "service_id": {"restricted"}}
 	req := httptest.NewRequest("POST", "/do-login", strings.NewReader(form.Encode()))
@@ -125,4 +126,52 @@ func TestMagicLinkVerify_RejectsUserWithoutRequiredRole(t *testing.T) {
 	require.Equal(t, http.StatusFound, w.Code)
 	loc := w.Header().Get("Location")
 	require.Contains(t, loc, "error=access_denied", "skal sendes tilbake med access_denied, ikke logges inn, fikk: %s", loc)
+}
+
+// Bryteren er global og gjelder uansett tjenestens auth_password: riktig
+// passord mot en tjeneste med auth_password=1 skal likevel gi 403.
+func TestDoLogin_GlobalSwitchOffReturns403(t *testing.T) {
+	ctx := context.Background()
+	sqldb, q, err := db.OpenMemory()
+	require.NoError(t, err)
+	t.Cleanup(func() { sqldb.Close() })
+
+	setupCheckPolicyService(t, q, "open", nil)
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.MinCost)
+	require.NoError(t, err)
+	hash := string(hashBytes)
+	user, err := q.CreateUser(ctx, gen.CreateUserParams{
+		Email: "bruker@example.com", PasswordHash: &hash, Roles: "user", Orgs: "test",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+
+	iss := token.NewIssuerForTest()
+	aud := audit.NewNoop()
+	refSvc := token.NewRefreshService(q, aud)
+	reg := service.NewRegistry(q)
+	require.NoError(t, reg.Warmup(ctx))
+
+	post := func(enabled bool, email, pw string) *httptest.ResponseRecorder {
+		h := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud, enabled)
+		form := url.Values{"email": {email}, "password": {pw}, "service_id": {"open"}}
+		req := httptest.NewRequest("POST", "/do-login", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		h.DoLogin(w, req)
+		return w
+	}
+
+	off := post(false, user.Email, "hunter2")
+	assert.Equal(t, http.StatusForbidden, off.Code)
+	assert.Empty(t, off.Result().Cookies(), "ingen sesjon utstedt med bryter av")
+
+	// Sjekken må skje før brukeroppslag og bcrypt: ellers ville disse gitt 401.
+	assert.Equal(t, http.StatusForbidden, post(false, "ukjent@example.com", "hunter2").Code, "ukjent e-post")
+	assert.Equal(t, http.StatusForbidden, post(false, user.Email, "feil").Code, "feil passord")
+
+	on := post(true, user.Email, "hunter2")
+	assert.Equal(t, http.StatusFound, on.Code, "bryter på: som før")
+	assert.Contains(t, on.Header().Get("Location"), "/dispatch?")
+	assert.NotEmpty(t, on.Result().Cookies(), "refresh-cookie settes")
 }

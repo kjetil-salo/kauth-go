@@ -73,12 +73,12 @@ func main() {
 	tmpl := template.Must(template.ParseGlob("templates/*.html"))
 
 	// ── 7. Initialiser auth-handlers ─────────────────────────────────────────
-	loginH := &auth.LoginHandler{Registry: registry, Templates: tmpl}
+	loginH := &auth.LoginHandler{Registry: registry, Templates: tmpl, PasswordLoginEnabled: cfg.PasswordLoginEnabled}
 	magicH := auth.NewMagicHandlers(*cfg, queries, mailSvc, issuer, refreshSvc, registry, auditSvc, tmpl)
 	adminSessions := admin.NewSessionStarter(issuer, auditSvc, cfg.AdminTokenTTL)
 	googleH := auth.NewGoogleHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc, adminSessions)
 	msH := auth.NewMicrosoftHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
-	passwordH := auth.NewPasswordHandlers(queries, issuer, refreshSvc, registry, auditSvc)
+	passwordH := auth.NewPasswordHandlers(queries, issuer, refreshSvc, registry, auditSvc, cfg.PasswordLoginEnabled)
 	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, Queries: queries, DefaultSvcID: ""}
 	meH := &auth.MeHandler{Issuer: issuer, CookieName: "auth_token"}
 

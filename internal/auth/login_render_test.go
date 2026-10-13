@@ -52,7 +52,27 @@ func testPageData(t *testing.T, theme, locale, rawURL string) LoginPageData {
 		Locale:      locale,
 		T:           i18n.Get(locale),
 		Languages:   i18n.Links(locale, u),
+
+		PasswordLoginEnabled: true,
 	}
+}
+
+func renderLogin(t *testing.T, passwordEnabled bool, authPassword int64) string {
+	t.Helper()
+	tmpl, err := template.ParseGlob("../../templates/*.html")
+	require.NoError(t, err)
+	data := testPageData(t, "dark", "nb", "/login?service=test")
+	data.PasswordLoginEnabled = passwordEnabled
+	data.Service.AuthPassword = authPassword
+	var out strings.Builder
+	require.NoError(t, tmpl.ExecuteTemplate(&out, "login.html", data))
+	return out.String()
+}
+
+func TestLoginTemplate_PasswordForm(t *testing.T) {
+	assert.NotContains(t, renderLogin(t, false, 1), `type="password"`, "bryter av skjuler skjemaet selv med auth_password=1")
+	assert.Contains(t, renderLogin(t, true, 1), `type="password"`)
+	assert.NotContains(t, renderLogin(t, true, 0), `type="password"`)
 }
 
 // TestLoginTemplate_RendersInAllLocales fanger feltnavn-typo i templaten —

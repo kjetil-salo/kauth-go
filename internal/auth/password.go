@@ -24,14 +24,23 @@ type PasswordHandlers struct {
 	refresh *token.RefreshService
 	reg     *service.Registry
 	aud     *audit.Service
+	// passwordLoginEnabled er den globale bryteren (KAUTH_PASSWORD_LOGIN_ENABLED).
+	// Den gjelder /do-login uansett tjenestens auth_password.
+	passwordLoginEnabled bool
 }
 
-func NewPasswordHandlers(q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service) *PasswordHandlers {
-	return &PasswordHandlers{queries: q, issuer: iss, refresh: ref, reg: reg, aud: aud}
+func NewPasswordHandlers(q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service, passwordLoginEnabled bool) *PasswordHandlers {
+	return &PasswordHandlers{queries: q, issuer: iss, refresh: ref, reg: reg, aud: aud, passwordLoginEnabled: passwordLoginEnabled}
 }
 
 // DoLogin — POST /do-login
 func (h *PasswordHandlers) DoLogin(w http.ResponseWriter, r *http.Request) {
+	// Før alt annet: ingen skjemaparsing, brukeroppslag eller bcrypt når
+	// bryteren er av.
+	if !h.passwordLoginEnabled {
+		http.Error(w, "passord-innlogging ikke aktivert", http.StatusForbidden)
+		return
+	}
 	_ = r.ParseForm()
 	email := strings.TrimSpace(r.FormValue("email"))
 	password := r.FormValue("password")

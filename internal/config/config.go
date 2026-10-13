@@ -44,6 +44,11 @@ type Config struct {
 	AccessTokenTTL time.Duration
 	AdminTokenTTL  time.Duration
 
+	// PasswordLoginEnabled er en global bryter over tjenestenes auth_password.
+	// Default av: passord-login er ikke i bruk i prod, og skal ikke kunne
+	// slås på ved en feiltakelse i en tjenesterad alene.
+	PasswordLoginEnabled bool
+
 	HTTPPort    string
 	CORSOrigins []string
 	LogLevel    string
@@ -165,6 +170,18 @@ func Load() (*Config, error) {
 		errs = append(errs, "ugyldig KAUTH_ADMIN_TOKEN_TTL: "+err.Error())
 	}
 	c.AdminTokenTTL = d
+
+	// Bare "true"/"false" (case-sensitivt) godtas. En skrivefeil som "yes"
+	// eller "TRUE" skal stoppe oppstart framfor å stille velge en side av
+	// en sikkerhetsbryter.
+	switch v := os.Getenv("KAUTH_PASSWORD_LOGIN_ENABLED"); v {
+	case "", "false":
+		c.PasswordLoginEnabled = false
+	case "true":
+		c.PasswordLoginEnabled = true
+	default:
+		errs = append(errs, `ugyldig KAUTH_PASSWORD_LOGIN_ENABLED: må være "true" eller "false"`)
+	}
 
 	c.HTTPPort = optional("KAUTH_HTTP_PORT", "8080")
 	c.LogLevel = optional("KAUTH_LOG_LEVEL", "info")

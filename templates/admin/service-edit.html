@@ -89,6 +89,7 @@
         <div class="checkbox-row">
             <input type="checkbox" id="auth_password" name="auth_password" value="1" {{if eq .Service.AuthPassword 1}}checked{{end}}>
             <label for="auth_password">Passord</label>
+            <small>Virker bare når KAUTH_PASSWORD_LOGIN_ENABLED=true er satt globalt.</small>
         </div>
 
         <h2>Branding</h2>
