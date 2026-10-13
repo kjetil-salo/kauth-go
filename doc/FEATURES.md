@@ -60,15 +60,26 @@ TTL settes per tjeneste via `services.access_token_ttl` (ISO 8601-varighet, f.ek
 
 ### Refresh-token-rotasjon
 
-256-bit opake tokens, lagret SHA-256-hashet (`refresh_tokens.token_hash`, 64 hex-char CHECK-constraint). Hver utstedelse skaper en ny familie eller arver eksisterende `family_id`. `POST /token?grant_type=refresh_token` roterer atomisk:
+256-bit opake tokens, lagret SHA-256-hashet (`refresh_tokens.token_hash`, 64 hex-char CHECK-constraint). Hver utstedelse skaper en ny familie eller arver eksisterende `family_id`. `POST /token?grant_type=refresh_token` roterer i én transaksjon:
 
-1. Token slås opp via hash, markeres `used = 1`
+1. Token konsumeres atomisk (`used = 1`) og barnet settes inn i samme transaksjon. Feiler en av delene, er ingenting endret
 2. Ny access-JWT + ny refresh-token utstedes med samme `family_id`
 3. Eksisterende refresh-cookie overskrives
 
-### Reuse-deteksjon med family-revocation
+Feil gir ulik status: klientfeil (ukjent, utløpt, revokert eller gjenbrukt token) gir 401, mens interne feil (DB, tilfeldighetskilde, cache) gir 500 `server_error`. Ved 500 beholder klienten cookien og kan prøve igjen.
 
-Hvis et brukt refresh-token forsøkes brukt på nytt, slår kauth opp raden ubetinget via `GetRefreshTokenByHash`. Hvis `used = 1` eller `revoked = 1`, revokeres HELE familien (`RevokeFamilyTokens`) og audit-event `refresh_token_reuse` logges. Klienten får generisk `invalid_grant`, men angriperen og legitime klienten kan ikke begge fortsette — hele kjeden er død. Matcher RFC OAuth-BCP §4.13.
+### Revokering av refresh-familier
+
+Familien er enheten for tilbaketrekking (ADN 10). Hele familien revokeres (`RevokeFamilyTokens`) når:
+
+- **Reuse:** et konsumert token presenteres igjen. Sjekken er uavhengig av `used`-flagget og av klientens request-context, slik at revokeringen fullføres selv om klienten kobler fra. Audit `refresh_token_reuse` får `service_id` og `gap_s=<sekunder>` fra barnets opprettelse til gjenbruket (`gap_s=unknown` hvis barnet mangler). Lite gap tyder på klient-race, stort gap på stjålet token. Gapet er grunnlaget hvis et idempotensvindu noen gang skal vurderes
+- **Revokert token presenteres:** familien tas ned på nytt (revoked_reason `revoked_token_presented`) og audit `refresh_token_revoked_presented` logges. Utløpt-men-ikke-revokert token gir bare avvisning
+- **Logout:** `GET /logout` revokerer familien til `refresh_token`-cookien (`user_logout`) før cookien slettes
+- **Deaktivering:** admin-deaktivering av en bruker revokerer alle brukerens refresh-tokens (`user_deactivated`)
+
+Klienten får generisk avvisning, og hele kjeden er død for både angriper og legitim klient. Et ekte refresh-race logger derfor ut begge parter. Matcher OAuth Security BCP (RFC 9700 §4.14.2).
+
+**Akseptert begrensning:** allerede utstedte access-tokens lever til TTL utløper etter logout eller deaktivering. `/api/me` validerer bare JWT-en og sjekker ikke databasen. Kortvarig TTL er den eneste avgrensningen.
 
 ### Per-tjeneste TTL og max-age
 
@@ -366,11 +377,11 @@ Intern-sti-grenen i `/dispatch` er fjernet: på nivå 1 godtas bare en `redirect
 ## Audit-logg
 
 Lagret i `audit_events`-tabellen med felter:
-- `event_type` — `login_success`, `login_failed`, `magic_link_login`, `google_oidc_login`, `microsoft_oidc_login`, `admin_login`, `admin_logout`, `admin_google_login`, `refresh_token_issued`, `refresh_token_rotated`, `refresh_token_reuse`, `service_created`, `service_edited`, ...
+- `event_type` — `login_success`, `login_failed`, `magic_link_login`, `google_oidc_login`, `microsoft_oidc_login`, `admin_login`, `admin_logout`, `admin_google_login`, `refresh_token_issued`, `refresh_token_rotated`, `refresh_token_reuse`, `refresh_token_revoked_presented`, `user_logout`, `user_deactivated`, `service_created`, `service_edited`, ...
 - `auth_method` — `google`, `microsoft`, `magic_link`, `password`, `refresh`
 - `email`, `service_id`, `ip_address`, `user_agent`
 - `success` — bool, alltid eksplisitt satt av applikasjonen
-- `details` — fritekst, brukes for grunn på feilet login
+- `details` — fritekst, brukes for grunn på feilet login. `refresh_token_reuse` har `gap_s=<n>`, `user_deactivated` har `id=<n> revoked=<antall>` eller `id=<n> revoke_failed` (deaktiveringen står selv om revokeringen feiler; refresh for deaktivert bruker avvises uansett)
 - `created_at` — ISO 8601 UTC
 
 90 dagers retensjon (cleanup-jobb sletter eldre). Eksporteres via admin GUI som CSV.
@@ -405,7 +416,7 @@ Alle stopper rent på `ctx.Done()` ved SIGTERM/SIGINT.
 | POST | `/do-login` | Passord-login (hvis aktivert) |
 | POST | `/token` | `grant_type=refresh_token` eller `grant_type=authorization_code` (+ PKCE) — CORS-aktivert |
 | GET | `/dispatch` | Post-login dispatcher |
-| GET | `/logout` | Slett cookies, redirect |
+| GET | `/logout` | Revokerer refresh-familien, sletter cookies, redirect |
 | GET | `/api/me` | JWT-introspection (returnerer claims som JSON) |
 | GET | `/.well-known/jwks.json` | JWKS — CORS-aktivert |
 | GET | `/.well-known/openid-configuration` | Discovery — CORS-aktivert |
