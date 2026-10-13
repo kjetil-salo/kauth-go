@@ -143,12 +143,16 @@ func fetchMSClaims(ctx context.Context, cfg *oauth2.Config, code string) (msClai
 	}
 	var cl msClaims
 	if err := idToken.Claims(&cl); err != nil {
+		// Feilen fra JSON-dekoderen navngir felt og type, ikke verdier, og
+		// trengs for å se hvilken claim Microsoft sender i et annet format.
+		slog.Warn("microsoft: claims kunne ikke dekodes", "err", err)
 		var partial struct {
 			Tid string `json:"tid"`
 		}
 		_ = idToken.Claims(&partial)
 		return msClaims{Tid: partial.Tid}, errClaimsDecode
 	}
+	cl.XmsEdov = parseEdov(cl.XmsEdovRaw)
 	return cl, nil
 }
 

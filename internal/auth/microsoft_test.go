@@ -78,18 +78,43 @@ func TestValidateMSClaims(t *testing.T) {
 	}
 }
 
-// Brukernavn-claim i rå JSON skal ikke gi e-post (K3), og xms_edov som
-// streng eller tall skal aldri tolkes som sann: dekodingen feiler lukket.
+// Brukernavn-claim i rå JSON skal ikke gi e-post (K3). xms_edov tolkes
+// tolerant: entydig sanne formater godtas, alt annet gir false. Et typeavvik
+// skal aldri feile dekodingen, ellers stenges personlige kontoer ute (MSA får
+// ikke claimen i samme format, sett i prod 2026-10-13).
 func TestMSClaims_RawJSON(t *testing.T) {
-	var cl msClaims
-	raw := `{"preferred_username":"u@example.com","tid":"` + msOrgTid + `","iss":"` + msIss(msOrgTid) + `","nonce":"` + msTestNon + `","xms_edov":true}`
-	require.NoError(t, json.Unmarshal([]byte(raw), &cl))
+	decode := func(raw string) msClaims {
+		var cl msClaims
+		require.NoError(t, json.Unmarshal([]byte(raw), &cl))
+		cl.XmsEdov = parseEdov(cl.XmsEdovRaw)
+		return cl
+	}
+	base := `"tid":"` + msOrgTid + `","iss":"` + msIss(msOrgTid) + `","nonce":"` + msTestNon + `"`
+	cl := decode(`{"preferred_username":"u@example.com",` + base + `,"xms_edov":true}`)
 	_, reason := validateMSClaims(cl, msTestNon)
 	assert.Equal(t, "email_missing", reason)
 
-	for _, v := range []string{`"true"`, `1`, `"1"`} {
-		var c msClaims
-		assert.Error(t, json.Unmarshal([]byte(`{"xms_edov":`+v+`}`), &c), v)
+	for _, v := range []string{`true`, `"true"`, `1`, `"1"`} {
+		cl := decode(`{"email":"a@example.com",` + base + `,"xms_edov":` + v + `}`)
+		email, reason := validateMSClaims(cl, msTestNon)
+		assert.Equal(t, "", reason, v)
+		assert.Equal(t, "a@example.com", email, v)
+	}
+	for _, v := range []string{`false`, `"false"`, `0`, `"0"`, `null`, `"yes"`, `{}`, `[]`} {
+		cl := decode(`{"email":"a@example.com",` + base + `,"xms_edov":` + v + `}`)
+		_, reason := validateMSClaims(cl, msTestNon)
+		assert.Equal(t, "edov", reason, v)
+	}
+	// Manglende claim på org-konto avvises; på MSA er den ikke nødvendig.
+	cl = decode(`{"email":"a@example.com",` + base + `}`)
+	_, reason = validateMSClaims(cl, msTestNon)
+	assert.Equal(t, "edov", reason)
+	msa := `"tid":"` + msPersonalTenantID + `","iss":"` + msIss(msPersonalTenantID) + `","nonce":"` + msTestNon + `"`
+	for _, v := range []string{``, `,"xms_edov":"1"`, `,"xms_edov":false`, `,"xms_edov":{}`} {
+		cl = decode(`{"email":"p@gmail.com",` + msa + v + `}`)
+		email, reason := validateMSClaims(cl, msTestNon)
+		assert.Equal(t, "", reason, v)
+		assert.Equal(t, "p@gmail.com", email, v)
 	}
 }
 

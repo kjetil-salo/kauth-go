@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/subtle"
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -26,12 +28,32 @@ const (
 // Brukernavn-claimen er bevisst utelatt: den er ikke verifisert eier av
 // en postadresse og kan ikke brukes som identitet.
 type msClaims struct {
-	Email   string `json:"email"`
-	Name    string `json:"name"`
-	Tid     string `json:"tid"`
-	Iss     string `json:"iss"`
-	Nonce   string `json:"nonce"`
-	XmsEdov *bool  `json:"xms_edov"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
+	Tid   string `json:"tid"`
+	Iss   string `json:"iss"`
+	Nonce string `json:"nonce"`
+	// XmsEdov settes fra XmsEdovRaw etter dekoding (parseEdov). Microsoft
+	// dokumenterer claimen som boolean, men formatet er ikke garantert likt for
+	// alle kontotyper; et typeavvik skal ikke stenge ute personlige kontoer,
+	// som uansett ikke bruker claimen.
+	XmsEdov    *bool           `json:"-"`
+	XmsEdovRaw json.RawMessage `json:"xms_edov"`
+}
+
+// parseEdov tolker xms_edov. Bare en entydig sann verdi (true, "true", "1",
+// 1) gir true; alt annet, også ukjente formater, gir false. Verdien er
+// signert av Microsoft, så dette er formattoleranse, ikke tillit til klienten.
+func parseEdov(raw json.RawMessage) *bool {
+	if len(raw) == 0 {
+		return nil
+	}
+	v := false
+	switch string(bytes.TrimSpace(raw)) {
+	case "true", `"true"`, `"1"`, "1":
+		v = true
+	}
+	return &v
 }
 
 // validateMSClaims erstatter go-oidc sin issuer-sjekk (skrudd av fordi
@@ -47,7 +69,7 @@ func validateMSClaims(cl msClaims, stateNonce string) (email string, reason stri
 		return "", msReasonIssuer
 	}
 	// Org-kontoer kan ha en e-postadresse tenant-admin har satt uten at
-	// domenet er verifisert; bare xms_edov == true (JSON-bool) godtas.
+	// domenet er verifisert; bare en entydig sann xms_edov godtas (parseEdov).
 	if !strings.EqualFold(cl.Tid, msPersonalTenantID) && (cl.XmsEdov == nil || !*cl.XmsEdov) {
 		return "", msReasonEdov
 	}
