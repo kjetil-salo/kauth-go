@@ -1,6 +1,8 @@
 package auth_test
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/auth"
+	"github.com/zral/kauth-go/internal/db"
 	"github.com/zral/kauth-go/internal/db/gen"
 	"github.com/zral/kauth-go/internal/service"
 	"github.com/zral/kauth-go/internal/token"
@@ -322,3 +326,186 @@ func TestDispatch_OIDCLevelClearsRedirectCookie(t *testing.T) {
 }
 
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
+
+// ── F9 / R21: tjenestemismatch på nivå 1 logges, men rutingen er uendret ──
+
+type mismatchFixture struct {
+	h    *auth.DispatchHandler
+	q    *gen.Queries
+	tok  string
+	logs *strings.Builder
+}
+
+func newMismatchFixture(t *testing.T) *mismatchFixture {
+	t.Helper()
+	sqldb, q, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqldb.Close() })
+	// :memory: gir en egen tom database per tilkobling, og audit skriver fra en goroutine.
+	sqldb.SetMaxOpenConns(1)
+
+	svcs := dispatchFixture()
+	// Delt callback: klarsyn og analyse peker begge til samme URL.
+	shared := "https://shared.klarsyn.net/auth/callback"
+	svcs[0].CallbackUrl = shared
+	svcs[1].CallbackUrl = shared
+	iss := token.NewIssuerForTest()
+	tok, err := iss.IssueAccess(gen.User{Email: "konge@example.com", Orgs: "lars", Roles: "konge"}, svcs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// slog.SetDefault er global: mismatch-testene må ikke kjøres med t.Parallel().
+	logs := &strings.Builder{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	return &mismatchFixture{
+		h: &auth.DispatchHandler{
+			Registry: service.NewRegistryForTest(svcs), Issuer: iss,
+			Audit: audit.NewService(q), DefaultSvcID: "klarsyn",
+		},
+		q: q, tok: tok, logs: logs,
+	}
+}
+
+func (f *mismatchFixture) dispatch(cookie, query string) string {
+	req := httptest.NewRequest(http.MethodGet, "/dispatch?token="+f.tok+query, nil)
+	req.Header.Set("Cookie", "redirect_uri="+url.QueryEscape(cookie))
+	w := httptest.NewRecorder()
+	f.h.ServeDispatch(w, req)
+	return w.Header().Get("Location")
+}
+
+func (f *mismatchFixture) events(t *testing.T) []gen.AuditEvent {
+	t.Helper()
+	// Audit.Log er asynkron: gi eventuelle events tid til å lande før vi teller.
+	time.Sleep(200 * time.Millisecond)
+	all, err := f.q.ListAuditEvents(context.Background(), gen.ListAuditEventsParams{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []gen.AuditEvent
+	for _, e := range all {
+		if e.EventType == "redirect_service_mismatch" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+const vinCallback = "https://kjeller.lilleklo.work/auth/callback"
+
+// AK9.1 + AK9.4: A/B-mismatch gir ett event med begge ID-er og uendret Location.
+func TestDispatchMismatch_LogsOneEventAndRedirectUnchanged(t *testing.T) {
+	f := newMismatchFixture(t)
+	loc := f.dispatch(vinCallback, "&service=klarsyn&rt=hemmelig-rt")
+	if want := vinCallback + "?token=" + f.tok + "#rt=hemmelig-rt"; loc != want {
+		t.Fatalf("Location endret: %q", loc)
+	}
+	evs := f.events(t)
+	if len(evs) != 1 {
+		t.Fatalf("forventet ett event, fikk %d", len(evs))
+	}
+	d := ""
+	if evs[0].Details != nil {
+		d = *evs[0].Details
+	}
+	if !strings.Contains(d, "klarsyn") || !strings.Contains(d, "vinkjeller") {
+		t.Errorf("details mangler tjeneste-ID-er: %q", d)
+	}
+	if evs[0].ServiceID == nil || *evs[0].ServiceID != "klarsyn" {
+		t.Errorf("service_id skal være innloggingstjenesten: %v", evs[0].ServiceID)
+	}
+	for _, secret := range []string{f.tok, "hemmelig-rt", "redirect_uri", "token=", "rt="} {
+		if strings.Contains(d, secret) || strings.Contains(f.logs.String(), secret) {
+			t.Errorf("hemmelighet %q lekket til audit-details eller slog", secret)
+		}
+	}
+	if !strings.Contains(f.logs.String(), "redirect_service_mismatch") {
+		t.Errorf("forventet slog.Warn, fikk %q", f.logs.String())
+	}
+}
+
+// AK9.2: samsvar og delt callback gir ingen event.
+func TestDispatchMismatch_MatchAndSharedCallbackNoEvent(t *testing.T) {
+	f := newMismatchFixture(t)
+	if loc := f.dispatch(vinCallback, "&service=vinkjeller"); !hasPrefix(loc, vinCallback) {
+		t.Fatalf("Location: %q", loc)
+	}
+	shared := "https://shared.klarsyn.net/auth/callback"
+	for _, svc := range []string{"klarsyn", "analyse"} {
+		if loc := f.dispatch(shared, "&service="+svc); !hasPrefix(loc, shared) {
+			t.Fatalf("Location: %q", loc)
+		}
+	}
+	if n := len(f.events(t)); n != 0 {
+		t.Fatalf("forventet ingen events, fikk %d", n)
+	}
+}
+
+// AK9.3: manglende ?service= gir event med tom innloggingstjeneste.
+func TestDispatchMismatch_MissingServiceLogsEvent(t *testing.T) {
+	f := newMismatchFixture(t)
+	loc := f.dispatch(vinCallback, "")
+	if !hasPrefix(loc, vinCallback+"?token=") {
+		t.Fatalf("Location endret: %q", loc)
+	}
+	evs := f.events(t)
+	if len(evs) != 1 {
+		t.Fatalf("forventet ett event, fikk %d", len(evs))
+	}
+	if evs[0].ServiceID != nil {
+		t.Errorf("tom innloggingstjeneste skal gi NULL service_id: %v", *evs[0].ServiceID)
+	}
+	if evs[0].Details == nil || !strings.Contains(*evs[0].Details, `target_service="vinkjeller"`) {
+		t.Errorf("details: %v", evs[0].Details)
+	}
+}
+
+// Klientstyrt ?service= kan ikke forfalske felt i Details eller peke ServiceID på en ukjent verdi.
+func TestDispatchMismatch_ForgedServiceSanitized(t *testing.T) {
+	f := newMismatchFixture(t)
+	f.dispatch(vinCallback, "&service="+url.QueryEscape("x target_service=klarsyn\nfake=1"))
+	evs := f.events(t)
+	if len(evs) != 1 {
+		t.Fatalf("forventet ett event, fikk %d", len(evs))
+	}
+	d := *evs[0].Details
+	// Newline fjernes, og mellomrommet blir værende inne i siteringen.
+	if want := `login_service="x target_service=klarsynfake=1" target_service="vinkjeller"`; d != want {
+		t.Errorf("details = %s, vil ha %s", d, want)
+	}
+	if evs[0].ServiceID != nil {
+		t.Errorf("ukjent tjeneste skal gi NULL service_id: %v", *evs[0].ServiceID)
+	}
+	if strings.Contains(f.logs.String(), "\nfake") {
+		t.Errorf("newline slapp gjennom i slog: %q", f.logs.String())
+	}
+}
+
+// Delt callback der innloggingstjenesten er en tredje: målet er første registrerte deler.
+func TestDispatchMismatch_SharedCallbackOtherLoginReportsFirst(t *testing.T) {
+	f := newMismatchFixture(t)
+	f.dispatch("https://shared.klarsyn.net/auth/callback", "&service=vinkjeller")
+	evs := f.events(t)
+	if len(evs) != 1 {
+		t.Fatalf("forventet ett event, fikk %d", len(evs))
+	}
+	if want := `login_service="vinkjeller" target_service="analyse"`; *evs[0].Details != want {
+		t.Errorf("details = %s, vil ha %s", *evs[0].Details, want)
+	}
+}
+
+// Avvist cookie (ikke registrert callback) gir ingen event.
+func TestDispatchMismatch_RejectedCookieNoEvent(t *testing.T) {
+	f := newMismatchFixture(t)
+	f.dispatch("https://evil.example/cb", "&service=klarsyn")
+	f.dispatch("/\\evil.example", "")
+	if n := len(f.events(t)); n != 0 {
+		t.Fatalf("forventet ingen events, fikk %d", n)
+	}
+}

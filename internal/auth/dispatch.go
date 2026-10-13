@@ -1,12 +1,15 @@
 package auth
 
 import (
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/db/gen"
 	"github.com/zral/kauth-go/internal/service"
 	"github.com/zral/kauth-go/internal/token"
@@ -17,7 +20,8 @@ type DispatchHandler struct {
 	Registry     *service.Registry
 	Issuer       *token.Issuer
 	Queries      *gen.Queries
-	DefaultSvcID string // ID til default-tjeneste for cookie-navn
+	Audit        *audit.Service // nil tillatt: da logges mismatch bare via slog
+	DefaultSvcID string         // ID til default-tjeneste for cookie-navn
 }
 
 // nullableStr returnerer nil for tom streng, ellers en peker til strengen —
@@ -166,11 +170,28 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 	// prefiksvurdering av stier er en open redirect. Alt annet ignoreres og
 	// rutingen faller videre til nivå 2-5.
 	if redirectURI := readRedirectCookie(r); redirectURI != "" {
+		var target *gen.Service
+		loginSvc := q.Get("service")
+		sharedWithLogin := false
 		for _, svc := range h.Registry.All() {
-			if h.Registry.IsAllowedCallback(svc, redirectURI) {
-				http.Redirect(w, r, appendTokenAndRT(redirectURI, jwtToken, rt), http.StatusSeeOther)
-				return
+			if !h.Registry.IsAllowedCallback(svc, redirectURI) {
+				continue
 			}
+			if target == nil {
+				target = svc
+			}
+			// Flere tjenester kan dele callback (klarsyn/analyse): da er det
+			// ingen mismatch så lenge innloggingstjenesten er blant dem.
+			if svc.ID == loginSvc {
+				sharedWithLogin = true
+			}
+		}
+		if target != nil {
+			if !sharedWithLogin {
+				h.logServiceMismatch(r, claims.Email, loginSvc, target.ID)
+			}
+			http.Redirect(w, r, appendTokenAndRT(redirectURI, jwtToken, rt), http.StatusSeeOther)
+			return
 		}
 	}
 
@@ -226,6 +247,35 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// logServiceMismatch registrerer at nivå 1 sender brukeren til en callback som
+// tilhører en annen tjeneste enn den brukeren logget inn mot. Bare logging: Lars har
+// bestemt at redirecten ikke skal håndheves før wspekto-flyten er rettet (L4).
+// Verken token, rt eller cookie-verdi skal inn her — kun tjeneste-ID-er.
+// ?service= er et klientstyrt hint, så loggen er ikke komplett deteksjon: den
+// fanger plantet cookie der login-handleren selv har satt service.
+func (h *DispatchHandler) logServiceMismatch(r *http.Request, email, loginSvc, targetSvc string) {
+	// Klientstyrt: renses, og siteres i Details så mellomrom ikke kan forfalske felt.
+	loginSvc = sanitizeLogValue(loginSvc)
+	slog.Warn("redirect_service_mismatch", "login_service", loginSvc, "target_service", targetSvc)
+	if h.Audit == nil {
+		return
+	}
+	// ServiceID skal bare peke på en ekte tjeneste.
+	svcID := ""
+	if loginSvc != "" && h.Registry.Resolve("", loginSvc, "") != nil {
+		svcID = loginSvc
+	}
+	h.Audit.Log(r.Context(), audit.Event{
+		Type:      "redirect_service_mismatch",
+		Email:     email,
+		ServiceID: svcID,
+		IP:        ClientIP(r),
+		UA:        r.Header.Get("User-Agent"),
+		Success:   true,
+		Details:   fmt.Sprintf("login_service=%q target_service=%q", loginSvc, targetSvc),
+	})
 }
 
 // ServeLogout håndterer GET /logout.
