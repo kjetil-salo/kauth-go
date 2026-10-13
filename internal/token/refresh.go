@@ -324,3 +324,34 @@ func (s *RefreshService) RevokeFamily(ctx context.Context, familyID, reason stri
 		slog.Error("kunne ikke revokere refresh-familie", "family_id", familyID, "reason", reason, "err", err)
 	}
 }
+
+// RevokeFamilyOfToken revokerer familien til et presentert refresh-token (logout).
+// Ukjent token gir ok=false uten skriving. Hash og klartekst logges aldri.
+// ok=true betyr at familien faktisk er revokert, så kalleren kan auditere trygt.
+func (s *RefreshService) RevokeFamilyOfToken(ctx context.Context, plain, reason string) (email, serviceID string, ok bool) {
+	// WithoutCancel: en frakobling midt i utloggingen skal ikke etterlate en levende familie.
+	ctx = context.WithoutCancel(ctx)
+	row, err := s.db.GetRefreshTokenByHash(ctx, hashToken(plain))
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Error("logout: oppslag av refresh-token feilet", "err", err)
+		}
+		return "", "", false
+	}
+	if err := s.db.RevokeFamilyTokens(ctx, gen.RevokeFamilyTokensParams{
+		RevokedReason: &reason,
+		FamilyID:      row.FamilyID,
+	}); err != nil {
+		slog.Error("logout: kunne ikke revokere refresh-familie", "family_id", row.FamilyID, "err", err)
+		return "", "", false
+	}
+	// Allerede revokert rad: revokeringen over er idempotent, men ok=false hindrer
+	// at en gjentatt logout med samme cookie gir nok en user_logout-audit.
+	if row.Revoked == 1 {
+		return "", "", false
+	}
+	if row.ServiceID != nil {
+		serviceID = *row.ServiceID
+	}
+	return row.Email, serviceID, true
+}

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -20,8 +21,9 @@ type DispatchHandler struct {
 	Registry     *service.Registry
 	Issuer       *token.Issuer
 	Queries      *gen.Queries
-	Audit        *audit.Service // nil tillatt: da logges mismatch bare via slog
-	DefaultSvcID string         // ID til default-tjeneste for cookie-navn
+	Audit        *audit.Service        // nil tillatt: da logges mismatch bare via slog
+	DefaultSvcID string                // ID til default-tjeneste for cookie-navn
+	Refresh      *token.RefreshService // nil tillatt: da revokeres ikke familien ved logout
 }
 
 // nullableStr returnerer nil for tom streng, ellers en peker til strengen —
@@ -298,6 +300,10 @@ func (h *DispatchHandler) ServeLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
+	// Familien revokeres før cookien slettes, ellers er tokenet allerede borte
+	// fra requesten. Feil her skal aldri hindre at brukeren blir logget ut.
+	h.revokeRefreshFamily(r)
+
 	// Slett refresh_token-cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
@@ -320,4 +326,29 @@ func (h *DispatchHandler) ServeLogout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// revokeRefreshFamily revokerer familien til refresh_token-cookien, hvis den
+// finnes og er kjent. Uten cookie eller med ukjent verdi skjer ingenting.
+func (h *DispatchHandler) revokeRefreshFamily(r *http.Request) {
+	if h.Refresh == nil {
+		return
+	}
+	c, err := r.Cookie("refresh_token")
+	if err != nil || c.Value == "" {
+		return
+	}
+	email, svcID, ok := h.Refresh.RevokeFamilyOfToken(r.Context(), c.Value, "user_logout")
+	if !ok || h.Audit == nil {
+		return
+	}
+	// WithoutCancel: auditen skal overleve at klienten kobler fra.
+	h.Audit.Log(context.WithoutCancel(r.Context()), audit.Event{
+		Type:      "user_logout",
+		Email:     email,
+		ServiceID: svcID,
+		IP:        ClientIP(r),
+		UA:        r.Header.Get("User-Agent"),
+		Success:   true,
+	})
 }
