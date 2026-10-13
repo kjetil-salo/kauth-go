@@ -76,7 +76,8 @@ func main() {
 	// ── 7. Initialiser auth-handlers ─────────────────────────────────────────
 	loginH := &auth.LoginHandler{Registry: registry, Templates: tmpl}
 	magicH := auth.NewMagicHandlers(*cfg, queries, mailSvc, issuer, refreshSvc, registry, auditSvc, tmpl)
-	googleH := auth.NewGoogleHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
+	adminSessions := admin.NewSessionStarter(issuer, auditSvc, cfg.AdminTokenTTL)
+	googleH := auth.NewGoogleHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc, adminSessions)
 	msH := auth.NewMicrosoftHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
 	passwordH := auth.NewPasswordHandlers(queries, issuer, refreshSvc, registry, auditSvc)
 	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, Queries: queries, DefaultSvcID: ""}
@@ -162,7 +163,7 @@ func main() {
 		r.Post("/login", adminAuthH.HandleLoginPost)
 		r.Get("/verify", adminAuthH.HandleVerify)
 		r.Get("/logout", adminAuthH.HandleLogout)
-		r.Get("/google-init", adminAuthH.HandleGoogleInitiate)
+		r.Get("/google-init", googleH.InitiateAdminLogin)
 		r.Get("/google-callback", adminAuthH.HandleGoogleCallback)
 
 		// Beskyttede admin-ruter

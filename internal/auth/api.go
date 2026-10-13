@@ -32,7 +32,7 @@ func (h *MeHandler) ServeMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	claims, err := h.Issuer.Verify(c.Value)
+	claims, err := h.Issuer.Verify(c.Value, token.ExpectAccess)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)

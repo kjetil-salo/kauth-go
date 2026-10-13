@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/zral/kauth-go/internal/auth"
 	"github.com/zral/kauth-go/internal/db/gen"
@@ -85,6 +86,29 @@ func TestDispatch_UnknownServiceIDIgnored(t *testing.T) {
 		}
 	}
 	t.Fatalf("landet utenfor registrerte callbacks: %s", loc)
+}
+
+// R5: /dispatch veksler bare access-tokens. Id-token og admin-token i ?token=
+// sendes til /login og gir aldri redirect til en tjeneste.
+func TestDispatch_RejectsNonAccessTokens(t *testing.T) {
+	h, iss := newDispatchHandler(t)
+	user := gen.User{Email: "konge@example.com", Orgs: "lars", Roles: "konge"}
+	idTok, err := iss.IssueIDToken(user, dispatchFixture()[1], "n")
+	if err != nil {
+		t.Fatalf("id-token: %v", err)
+	}
+	adminTok, err := iss.IssueAdmin(user, time.Hour)
+	if err != nil {
+		t.Fatalf("admin-token: %v", err)
+	}
+	for name, tok := range map[string]string{"id": idTok, "admin": adminTok} {
+		req := httptest.NewRequest(http.MethodGet, "/dispatch?token="+tok+"&service=klarsyn", nil)
+		w := httptest.NewRecorder()
+		h.ServeDispatch(w, req)
+		if loc := w.Header().Get("Location"); loc != "/login" {
+			t.Errorf("%s-token: forventet redirect til /login, fikk %q", name, loc)
+		}
+	}
 }
 
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }

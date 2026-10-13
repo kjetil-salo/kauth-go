@@ -219,6 +219,14 @@ func (h *MagicHandlers) VerifyToken(w http.ResponseWriter, r *http.Request) {
 		h.redirectWithError(w, r, svc.ID, "expired", locale)
 		return
 	}
+	// Formålsbinding (ADN 9): et token uten tjeneste er utstedt til admin-panelet
+	// (/admin/verify) og skal ikke kunne gi en tjenesteinnlogging. Behandles som
+	// et ugyldig token. At service_id stemmer med svc sjekkes først i Fase 1.
+	if magic.ServiceID == nil {
+		h.aud.Log(r.Context(), audit.Event{Type: "login_failed", AuthMethod: "magic_link", Email: magic.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false, Details: "admin-token brukt mot tjenesteinnlogging"})
+		h.redirectWithError(w, r, svc.ID, "expired", locale)
+		return
+	}
 
 	user, err := h.queries.GetActiveUserByEmail(r.Context(), magic.Email)
 	if err != nil {

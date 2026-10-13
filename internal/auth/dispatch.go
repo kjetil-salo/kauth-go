@@ -72,7 +72,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Verifiser token
-	claims, err := h.Issuer.Verify(jwtToken)
+	claims, err := h.Issuer.Verify(jwtToken, token.ExpectAccess)
 	if err != nil {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
