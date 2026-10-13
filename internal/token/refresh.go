@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/zral/kauth-go/internal/audit"
@@ -17,7 +18,8 @@ import (
 var ErrTokenReuse = errors.New("refresh-token gjenbruk oppdaget — familie tilbakekalt")
 var ErrTokenRevoked = errors.New("refresh-token er tilbakekalt")
 
-type RotationResult struct{ NewToken, Email, FamilyID string }
+// ServiceID er tjenesten lagret på den konsumerte raden; tom når raden har NULL.
+type RotationResult struct{ NewToken, Email, FamilyID, ServiceID string }
 
 // RefreshQuerier er interfacet RefreshService trenger fra DB-laget.
 // Eksportert slik at tester kan injisere stubs.
@@ -184,5 +186,16 @@ func (s *RefreshService) Rotate(ctx context.Context, plainToken, ip, ua string) 
 		svcID = *consumed.ServiceID
 	}
 	s.audit.Log(ctx, audit.Event{Type: "refresh_token_rotated", Email: consumed.Email, ServiceID: svcID, IP: ip, UA: ua, Success: true})
-	return &RotationResult{NewToken: newPlain, Email: consumed.Email, FamilyID: consumed.FamilyID}, nil
+	return &RotationResult{NewToken: newPlain, Email: consumed.Email, FamilyID: consumed.FamilyID, ServiceID: svcID}, nil
+}
+
+// RevokeFamily tilbakekaller alle ubrukte tokens i familien, inkludert barnet
+// en rotasjon nettopp har laget. Feil logges bare: kalleren avviser uansett.
+func (s *RefreshService) RevokeFamily(ctx context.Context, familyID, reason string) {
+	if err := s.db.RevokeFamilyTokens(ctx, gen.RevokeFamilyTokensParams{
+		RevokedReason: &reason,
+		FamilyID:      familyID,
+	}); err != nil {
+		slog.Error("kunne ikke revokere refresh-familie", "family_id", familyID, "reason", reason, "err", err)
+	}
 }

@@ -32,6 +32,9 @@ type LoginPageData struct {
 	// Tagline er tjenestens budskap på valgt språk, med services.tagline som
 	// fallback for tjenester som ennå ikke er oversatt.
 	Tagline string
+	// PasswordLoginEnabled er den globale bryteren; passordskjemaet vises
+	// bare når den er på og tjenesten har auth_password=1.
+	PasswordLoginEnabled bool
 }
 
 // buildBgCSS beregner CSS background-verdier for BodyBgCSS og BeforeBgCSS.
@@ -65,6 +68,8 @@ func buildBgCSS(theme string, bgImage *string, bgCss *string) (bodyCss, beforeCs
 type LoginHandler struct {
 	Registry  *service.Registry
 	Templates *template.Template
+	// PasswordLoginEnabled speiler config.PasswordLoginEnabled.
+	PasswordLoginEnabled bool
 }
 
 // ServeLogin håndterer GET /login — også kauths authorization_endpoint for
@@ -149,6 +154,8 @@ func (h *LoginHandler) ServeLogin(w http.ResponseWriter, r *http.Request) {
 		T:           i18n.Get(locale),
 		Languages:   i18n.Links(locale, r.URL),
 		Tagline:     tagline,
+
+		PasswordLoginEnabled: h.PasswordLoginEnabled,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

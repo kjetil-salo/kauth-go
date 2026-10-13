@@ -50,7 +50,7 @@ func setupRefreshTest(t *testing.T) (*auth.PasswordHandlers, *token.RefreshServi
 	reg := service.NewRegistry(q)
 	require.NoError(t, reg.Warmup(ctx))
 
-	h := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud)
+	h := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud, true)
 	return h, refSvc, user, svc
 }
 

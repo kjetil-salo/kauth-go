@@ -51,7 +51,10 @@ func (s *stubRefreshDB) GetRefreshTokenByHash(_ context.Context, hash string) (g
 
 func (s *stubRefreshDB) RevokeFamilyTokens(_ context.Context, p gen.RevokeFamilyTokensParams) error {
 	for i, t := range s.tokens {
-		if t.FamilyID == p.FamilyID { s.tokens[i].Revoked = 1; s.tokens[i].RevokedReason = p.RevokedReason }
+		if t.FamilyID == p.FamilyID {
+			s.tokens[i].Revoked = 1
+			s.tokens[i].RevokedReason = p.RevokedReason
+		}
 	}
 	return nil
 }
@@ -65,11 +68,19 @@ func TestRotate_IssueAndRotate(t *testing.T) {
 	svc := newTestRefreshSvc(db)
 	ctx := context.Background()
 	plain, err := svc.Issue(ctx, testUser(), testService(), "127.0.0.1", "ua")
-	if err != nil { t.Fatalf("Issue: %v", err) }
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
 	result, err := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
-	if err != nil { t.Fatalf("Rotate: %v", err) }
-	if result.Email != "test@example.com" { t.Errorf("feil email") }
-	if result.NewToken == plain { t.Error("token ikke rotert") }
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if result.Email != "test@example.com" {
+		t.Errorf("feil email")
+	}
+	if result.NewToken == plain {
+		t.Error("token ikke rotert")
+	}
 }
 
 func TestRotate_Reuse_RevokeFamily(t *testing.T) {
@@ -80,10 +91,14 @@ func TestRotate_Reuse_RevokeFamily(t *testing.T) {
 	result, _ := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
 	// Gjenbruk av originalt token
 	_, err := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
-	if err == nil { t.Fatal("forventet ErrTokenReuse") }
+	if err == nil {
+		t.Fatal("forventet ErrTokenReuse")
+	}
 	// Nytt token (fra rotasjon) skal også være ugyldig
 	_, err = svc.Rotate(ctx, result.NewToken, "127.0.0.1", "ua")
-	if err == nil { t.Fatal("forventet feil — familie tilbakekalt") }
+	if err == nil {
+		t.Fatal("forventet feil — familie tilbakekalt")
+	}
 }
 
 func TestRotate_FamilyExpiresAt_Inherited(t *testing.T) {
@@ -93,11 +108,55 @@ func TestRotate_FamilyExpiresAt_Inherited(t *testing.T) {
 	svc := newTestRefreshSvc(db)
 	ctx := context.Background()
 	plain, _ := svc.Issue(ctx, testUser(), svcWithAge, "127.0.0.1", "ua")
-	if db.tokens[0].FamilyExpiresAt == nil { t.Fatal("family_expires_at skal være satt") }
+	if db.tokens[0].FamilyExpiresAt == nil {
+		t.Fatal("family_expires_at skal være satt")
+	}
 	svc.Rotate(ctx, plain, "127.0.0.1", "ua")
-	if len(db.tokens) < 2 { t.Fatal("mangler rotert token") }
+	if len(db.tokens) < 2 {
+		t.Fatal("mangler rotert token")
+	}
 	if *db.tokens[0].FamilyExpiresAt != *db.tokens[1].FamilyExpiresAt {
 		t.Error("family_expires_at ikke arvet ved rotasjon")
 	}
 }
 
+func TestRotate_ReturnsServiceID(t *testing.T) {
+	db := &stubRefreshDB{}
+	svc := newTestRefreshSvc(db)
+	ctx := context.Background()
+	plain, _ := svc.Issue(ctx, testUser(), testService(), "127.0.0.1", "ua")
+	res, err := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if res.ServiceID != "testsvc" {
+		t.Errorf("ServiceID = %q, vil ha testsvc", res.ServiceID)
+	}
+}
+
+func TestRotate_NullServiceIDGivesEmpty(t *testing.T) {
+	db := &stubRefreshDB{}
+	svc := newTestRefreshSvc(db)
+	ctx := context.Background()
+	plain, _ := svc.Issue(ctx, testUser(), testService(), "127.0.0.1", "ua")
+	db.tokens[0].ServiceID = nil
+	res, err := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if res.ServiceID != "" {
+		t.Errorf("ServiceID = %q, vil ha tom", res.ServiceID)
+	}
+}
+
+func TestRevokeFamily_RevokesUnusedChild(t *testing.T) {
+	db := &stubRefreshDB{}
+	svc := newTestRefreshSvc(db)
+	ctx := context.Background()
+	plain, _ := svc.Issue(ctx, testUser(), testService(), "127.0.0.1", "ua")
+	res, _ := svc.Rotate(ctx, plain, "127.0.0.1", "ua")
+	svc.RevokeFamily(ctx, res.FamilyID, "policy_denied")
+	if _, err := svc.Rotate(ctx, res.NewToken, "127.0.0.1", "ua"); err == nil {
+		t.Fatal("barnet skulle vært revokert")
+	}
+}

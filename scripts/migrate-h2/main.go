@@ -28,7 +28,7 @@ const (
 // decodeH2String decodes an H2 string value token into a Go string.
 // Handles three forms:
 //   - NULL              → returns ("", true [null])
-//   - 'plain string'   → unescapes '' → '
+//   - 'plain string'   → unescapes ” → '
 //   - U&'unicode str'  → additionally decodes \NNNN hex escapes
 func decodeH2String(tok string) (val string, isNull bool) {
 	tok = strings.TrimSpace(tok)
@@ -174,7 +174,7 @@ func nowUTC() string {
 // ---- tuple parser ----
 
 // splitTuple splits a "(v1, v2, ...)" string into individual value tokens,
-// respecting quoted strings (single-quoted, with '' escapes) and nested parens
+// respecting quoted strings (single-quoted, with ” escapes) and nested parens
 // (for TIMESTAMP WITH TIME ZONE '...').
 func splitTuple(line string) []string {
 	line = strings.TrimSpace(line)

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/zral/kauth-go/internal/admin"
 	"github.com/zral/kauth-go/internal/audit"
@@ -74,12 +73,13 @@ func main() {
 	tmpl := template.Must(template.ParseGlob("templates/*.html"))
 
 	// ── 7. Initialiser auth-handlers ─────────────────────────────────────────
-	loginH := &auth.LoginHandler{Registry: registry, Templates: tmpl}
+	loginH := &auth.LoginHandler{Registry: registry, Templates: tmpl, PasswordLoginEnabled: cfg.PasswordLoginEnabled}
 	magicH := auth.NewMagicHandlers(*cfg, queries, mailSvc, issuer, refreshSvc, registry, auditSvc, tmpl)
-	googleH := auth.NewGoogleHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
+	adminSessions := admin.NewSessionStarter(issuer, auditSvc, cfg.AdminTokenTTL)
+	googleH := auth.NewGoogleHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc, adminSessions)
 	msH := auth.NewMicrosoftHandlers(*cfg, queries, issuer, refreshSvc, registry, auditSvc)
-	passwordH := auth.NewPasswordHandlers(queries, issuer, refreshSvc, registry, auditSvc)
-	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, Queries: queries, DefaultSvcID: ""}
+	passwordH := auth.NewPasswordHandlers(queries, issuer, refreshSvc, registry, auditSvc, cfg.PasswordLoginEnabled).WithCORSOrigins(cfg.CORSOrigins)
+	dispatchH := &auth.DispatchHandler{Registry: registry, Issuer: issuer, Queries: queries, Audit: auditSvc, DefaultSvcID: ""}
 	meH := &auth.MeHandler{Issuer: issuer, CookieName: "auth_token"}
 
 	// ── 8. Initialiser admin-handlers ────────────────────────────────────────
@@ -96,11 +96,7 @@ func main() {
 	// ── 10. Bygg Chi-router ───────────────────────────────────────────────────
 	r := chi.NewRouter()
 
-	// Global middleware
-	r.Use(chimiddleware.RealIP)
-	r.Use(chimiddleware.Logger)
-	r.Use(chimiddleware.Recoverer)
-	r.Use(auth.ClientIPMiddleware)
+	auth.UseGlobal(r, slog.Default())
 
 	// Statiske filer
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
@@ -126,7 +122,7 @@ func main() {
 
 	// ── Microsoft OIDC ────────────────────────────────────────────────────────
 	r.Get("/ms-oidc-login", msH.InitiateLogin)
-		r.Get("/ms-social-login", msH.InitiateLogin)
+	r.Get("/ms-social-login", msH.InitiateLogin)
 	r.Get("/ms-callback", msH.HandleCallback)
 
 	// ── Magic link ────────────────────────────────────────────────────────────
@@ -160,7 +156,7 @@ func main() {
 		r.Post("/login", adminAuthH.HandleLoginPost)
 		r.Get("/verify", adminAuthH.HandleVerify)
 		r.Get("/logout", adminAuthH.HandleLogout)
-		r.Get("/google-init", adminAuthH.HandleGoogleInitiate)
+		r.Get("/google-init", googleH.InitiateAdminLogin)
 		r.Get("/google-callback", adminAuthH.HandleGoogleCallback)
 
 		// Beskyttede admin-ruter
@@ -196,7 +192,7 @@ func main() {
 
 	// ── 11. Start HTTP-server med graceful shutdown ───────────────────────────
 	srv := &http.Server{
-		Addr:              ":" + cfg.HTTPPort,
+		Addr:              config.ListenAddr(cfg.HTTPAddr, cfg.HTTPPort),
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -206,7 +202,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Printf("kauth lytter på :%s (issuer: %s)\n", cfg.HTTPPort, cfg.Issuer)
+		fmt.Printf("kauth lytter på %s (issuer: %s)\n", srv.Addr, cfg.Issuer)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

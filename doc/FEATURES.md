@@ -260,8 +260,8 @@ Beskyttede ruter under `/admin/*` med separat `admin_token`-cookie (egen JWT med
 ### Innlogging
 
 - `GET /admin/login` — viking-door bakgrunn, primær Google-knapp + sekundær e-postlenke
-- `GET /admin/google-init` — redirecter til `/social-login?redirect_uri=/admin/google-callback` slik at admin-flyten gjenbruker vanlig Google-callback (samme URL som er hvitlistet hos Google)
-- `GET /admin/google-callback` — intern handler. Leser JWT fra `?token=` (satt av dispatcher etter Google-callback), verifiserer signaturen, sjekker konge-rolle i databasen, utsteder admin-token og setter cookie
+- `GET /admin/google-init` — starter vanlig Google-flyt mot samme `/callback` (samme URL som er hvitlistet hos Google), men med admin-formål i den HMAC-signerte state-parameteren. Formålet hentes aldri fra query, cookie eller `redirect_uri`, og flyten går ikke innom `/dispatch`
+- `GET /admin/google-callback` — utgått inngang som ikke setter cookie og bare redirecter til `/admin/login`. Admin-sesjonen settes i OIDC-callbacken (`/callback`) når signert state har admin-formål: aktiv bruker, eksakt rolle `konge` og e-post bekreftet av Google
 - `POST /admin/login` — magic-link-flyt for admin (anti-enumeration, 200ms floor)
 - `GET /admin/verify?token=<X>` — konsumerer magic-token, sjekker konge-rolle
 
@@ -359,9 +359,9 @@ IDen valideres alltid mot registryet, og redirect går kun til `callback_url` sl
 
 Nivå 4 er en heuristikk og bør ikke stoles på: den itererer over tjenestene i `display_name`-rekkefølge og tar den første med en `default_org` brukeren har. En bruker som ikke har tjenestens `default_org` blant sine orgs vil havne feil. Den står igjen kun for forespørsler uten `?service=`, og bør fjernes når ingenting eksternt bruker den (se `CHANGELOG.md`, Unreleased/Fixed).
 
-### Intern dispatch (admin Google-flyten)
+### Admin Google-flyten og `/dispatch`
 
-Når `redirect_uri`-cookien starter med `/` (intern path, ikke en ekstern URL), dispatcheren hopper over allowlist-sjekken og redirecter direkte til intern handler med `?token=<jwt>`. Brukt av admin Google-flyten: `/admin/google-init` → `/social-login?redirect_uri=/admin/google-callback` → vanlig Google OAuth → `/callback` → `/dispatch` → `/admin/google-callback?token=<jwt>` → admin-token-cookie og redirect til `/admin/users`. Protokoll-relativ path (`//evil.com`) avvises som potensiell open-redirect.
+Intern-sti-grenen i `/dispatch` er fjernet: på nivå 1 godtas bare en `redirect_uri` som er eksakt lik en registrert `callback_url`. Admin Google-flyten går ikke lenger via `/dispatch`. `/admin/google-init` legger admin-formål i den signerte state-parameteren, og `/callback` setter `admin_token`-cookien direkte (ingen JWT i URL-en) og redirecter til `/admin/users`. Peker nivå 1 til en callback hos en annen tjeneste enn den verifiserte, logges `redirect_service_mismatch` (007 F9).
 
 ## Audit-logg
 
@@ -419,8 +419,8 @@ Alle stopper rent på `ctx.Done()` ved SIGTERM/SIGINT.
 | POST | `/admin/login` | Åpen — anti-enumeration |
 | GET | `/admin/verify` | Åpen — krever magic-token |
 | GET | `/admin/logout` | Åpen |
-| GET | `/admin/google-init` | Åpen — redirect til `/social-login?redirect_uri=/admin/google-callback` |
-| GET | `/admin/google-callback` | Åpen — leser JWT fra `?token=`, sjekker konge-rolle og setter admin-cookie |
+| GET | `/admin/google-init` | Åpen — starter Google-flyt med admin-formål i signert state |
+| GET | `/admin/google-callback` | Åpen — utgått, redirecter til `/admin/login` uten å sette cookie |
 | GET | `/admin/users[/new/{id}/edit/export]` | konge-rolle |
 | POST | `/admin/users[/{id}[/deactivate]]` | konge-rolle |
 | GET | `/admin/audit[/export]` | konge-rolle |

@@ -1,12 +1,15 @@
 package auth
 
 import (
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/db/gen"
 	"github.com/zral/kauth-go/internal/service"
 	"github.com/zral/kauth-go/internal/token"
@@ -17,7 +20,8 @@ type DispatchHandler struct {
 	Registry     *service.Registry
 	Issuer       *token.Issuer
 	Queries      *gen.Queries
-	DefaultSvcID string // ID til default-tjeneste for cookie-navn
+	Audit        *audit.Service // nil tillatt: da logges mismatch bare via slog
+	DefaultSvcID string         // ID til default-tjeneste for cookie-navn
 }
 
 // nullableStr returnerer nil for tom streng, ellers en peker til strengen —
@@ -72,7 +76,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Verifiser token
-	claims, err := h.Issuer.Verify(jwtToken)
+	claims, err := h.Issuer.Verify(jwtToken, token.ExpectAccess)
 	if err != nil {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
@@ -86,6 +90,20 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		HttpOnly: true,
 		Secure:   os.Getenv("KAUTH_INSECURE_COOKIES") != "true",
 		SameSite: http.SameSiteLaxMode,
+	}
+	cleared := false
+	clearRedirect := func() {
+		if !cleared {
+			cleared = true
+			http.SetCookie(w, clearRedirectCookie)
+		}
+	}
+
+	// En redirect_uri-cookie slettes uansett hvilket nivå som ruter, også
+	// OIDC-nivå 0 som aldri leser den: ellers overlever en plantet cookie en
+	// OIDC-runde og slår til ved neste vanlige innlogging.
+	if _, err := r.Cookie("redirect_uri"); err == nil {
+		clearRedirect()
 	}
 
 	// Nivå 0: standard OIDC authorization_code-flyt. oidc_authz-cookien ble
@@ -145,27 +163,35 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Nivå 1: eksplisitt redirect_uri fra cookie
+	// Nivå 1: eksplisitt redirect_uri fra cookie. Cookien er usignert og kan
+	// plantes av hvem som helst via ?redirect_uri=, så bare en verdi som er
+	// eksakt lik en registrert callback_url godtas. Ingen intern-sti-gren:
+	// nettlesere tolker `/\evil.example` som `//evil.example`, så enhver
+	// prefiksvurdering av stier er en open redirect. Alt annet ignoreres og
+	// rutingen faller videre til nivå 2-5.
 	if redirectURI := readRedirectCookie(r); redirectURI != "" {
-		// Intern path (starter med / men ikke //) → ingen allowlist-sjekk nødvendig.
-		// Dobbel-skråstrek (//) ville vært protokoll-relativ URL og potensielt open redirect.
-		if strings.HasPrefix(redirectURI, "/") && !strings.HasPrefix(redirectURI, "//") {
-			http.SetCookie(w, clearRedirectCookie)
-			sep := "?"
-			if strings.Contains(redirectURI, "?") {
-				sep = "&"
+		var target *gen.Service
+		loginSvc := q.Get("service")
+		sharedWithLogin := false
+		for _, svc := range h.Registry.All() {
+			if !h.Registry.IsAllowedCallback(svc, redirectURI) {
+				continue
 			}
-			http.Redirect(w, r, redirectURI+sep+"token="+url.QueryEscape(jwtToken), http.StatusSeeOther)
-			return
+			if target == nil {
+				target = svc
+			}
+			// Flere tjenester kan dele callback (klarsyn/analyse): da er det
+			// ingen mismatch så lenge innloggingstjenesten er blant dem.
+			if svc.ID == loginSvc {
+				sharedWithLogin = true
+			}
 		}
-		// Ekstern URL → eksisterende allowlist-sjekk
-		allSvcs := h.Registry.All()
-		for _, svc := range allSvcs {
-			if h.Registry.IsAllowedCallback(svc, redirectURI) {
-				http.SetCookie(w, clearRedirectCookie)
-				http.Redirect(w, r, appendTokenAndRT(redirectURI, jwtToken, rt), http.StatusSeeOther)
-				return
+		if target != nil {
+			if !sharedWithLogin {
+				h.logServiceMismatch(r, claims.Email, loginSvc, target.ID)
 			}
+			http.Redirect(w, r, appendTokenAndRT(redirectURI, jwtToken, rt), http.StatusSeeOther)
+			return
 		}
 	}
 
@@ -176,7 +202,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 	// havner da på feil tjeneste.
 	if svcID := q.Get("service"); svcID != "" {
 		if svc := h.Registry.Resolve("", svcID, ""); svc != nil {
-			http.SetCookie(w, clearRedirectCookie)
+			clearRedirect()
 			http.Redirect(w, r, appendTokenAndRT(svc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 			return
 		}
@@ -191,7 +217,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		allSvcs := h.Registry.All()
 		for _, svc := range allSvcs {
 			if svc.AuthHost != nil && strings.ToLower(*svc.AuthHost) == hostLc {
-				http.SetCookie(w, clearRedirectCookie)
+				clearRedirect()
 				http.Redirect(w, r, appendTokenAndRT(svc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 				return
 			}
@@ -206,7 +232,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		}
 		for _, org := range claims.Org {
 			if org == *svc.DefaultOrg {
-				http.SetCookie(w, clearRedirectCookie)
+				clearRedirect()
 				http.Redirect(w, r, appendTokenAndRT(svc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 				return
 			}
@@ -216,11 +242,40 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 	// Nivå 5: fallback til default-tjenestens callback
 	defaultSvc := h.Registry.ResolveOrDefault("", h.DefaultSvcID, "")
 	if defaultSvc != nil {
-		http.SetCookie(w, clearRedirectCookie)
+		clearRedirect()
 		http.Redirect(w, r, appendTokenAndRT(defaultSvc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 		return
 	}
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// logServiceMismatch registrerer at nivå 1 sender brukeren til en callback som
+// tilhører en annen tjeneste enn den brukeren logget inn mot. Bare logging: Lars har
+// bestemt at redirecten ikke skal håndheves før wspekto-flyten er rettet (L4).
+// Verken token, rt eller cookie-verdi skal inn her — kun tjeneste-ID-er.
+// ?service= er et klientstyrt hint, så loggen er ikke komplett deteksjon: den
+// fanger plantet cookie der login-handleren selv har satt service.
+func (h *DispatchHandler) logServiceMismatch(r *http.Request, email, loginSvc, targetSvc string) {
+	// Klientstyrt: renses, og siteres i Details så mellomrom ikke kan forfalske felt.
+	loginSvc = sanitizeLogValue(loginSvc)
+	slog.Warn("redirect_service_mismatch", "login_service", loginSvc, "target_service", targetSvc)
+	if h.Audit == nil {
+		return
+	}
+	// ServiceID skal bare peke på en ekte tjeneste.
+	svcID := ""
+	if loginSvc != "" && h.Registry.Resolve("", loginSvc, "") != nil {
+		svcID = loginSvc
+	}
+	h.Audit.Log(r.Context(), audit.Event{
+		Type:      "redirect_service_mismatch",
+		Email:     email,
+		ServiceID: svcID,
+		IP:        ClientIP(r),
+		UA:        r.Header.Get("User-Agent"),
+		Success:   true,
+		Details:   fmt.Sprintf("login_service=%q target_service=%q", loginSvc, targetSvc),
+	})
 }
 
 // ServeLogout håndterer GET /logout.

@@ -36,7 +36,7 @@ func TestDeleteExpiredAuthorizationCodes_RunsAgainstMigratedSchema(t *testing.T)
 		t.Helper()
 		require.NoError(t, q.InsertAuthorizationCode(ctx, gen.InsertAuthorizationCodeParams{
 			Code: code, ServiceID: "veivakt", Email: "sjafor@example.com",
-			RedirectUri: "https://veivakt.app/auth/callback",
+			RedirectUri:   "https://veivakt.app/auth/callback",
 			CodeChallenge: "challenge", CodeChallengeMethod: "S256",
 			CreatedAt: now.Add(-2 * time.Minute).Format("2006-01-02T15:04:05Z"),
 			ExpiresAt: expires,

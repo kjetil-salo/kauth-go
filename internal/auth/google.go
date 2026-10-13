@@ -21,17 +21,27 @@ import (
 	"github.com/zral/kauth-go/internal/token"
 )
 
-type GoogleHandlers struct {
-	cfg     config.Config
-	queries *gen.Queries
-	issuer  *token.Issuer
-	refresh *token.RefreshService
-	reg     *service.Registry
-	aud     *audit.Service
+// AdminSessionStarter lar OIDC-callbacken starte en admin-sesjon uten at auth
+// kjenner admin-cookie, TTL eller admin-audit. Implementasjonen ligger i
+// internal/admin (som ikke kan importeres herfra uten syklus) og injiseres fra
+// main.go. Kalleren har allerede verifisert at brukeren er aktiv og har
+// rollen konge.
+type AdminSessionStarter interface {
+	StartAdminSession(w http.ResponseWriter, r *http.Request, user gen.User, serviceID string) error
 }
 
-func NewGoogleHandlers(cfg config.Config, q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service) *GoogleHandlers {
-	return &GoogleHandlers{cfg: cfg, queries: q, issuer: iss, refresh: ref, reg: reg, aud: aud}
+type GoogleHandlers struct {
+	cfg           config.Config
+	queries       *gen.Queries
+	issuer        *token.Issuer
+	refresh       *token.RefreshService
+	reg           *service.Registry
+	aud           *audit.Service
+	adminSessions AdminSessionStarter
+}
+
+func NewGoogleHandlers(cfg config.Config, q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service, adminSessions AdminSessionStarter) *GoogleHandlers {
+	return &GoogleHandlers{cfg: cfg, queries: q, issuer: iss, refresh: ref, reg: reg, aud: aud, adminSessions: adminSessions}
 }
 
 // InitiateLogin — GET /oidc-login eller /social-login
@@ -53,6 +63,20 @@ func (h *GoogleHandlers) InitiateLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	svc := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
+	h.redirectToGoogle(w, r, svc, false)
+}
+
+// InitiateAdminLogin — GET /admin/google-init
+// Starter samme Google-flyt og samme /callback som vanlig innlogging, men med
+// admin-formål i den HMAC-signerte staten. Formålet hentes aldri fra query,
+// cookie eller redirect_uri, og redirect_uri-cookien settes ikke: admin-flyten
+// skal ikke innom /dispatch.
+func (h *GoogleHandlers) InitiateAdminLogin(w http.ResponseWriter, r *http.Request) {
+	svc := h.reg.ResolveOrDefault(r.Host, "", "")
+	h.redirectToGoogle(w, r, svc, true)
+}
+
+func (h *GoogleHandlers) redirectToGoogle(w http.ResponseWriter, r *http.Request, svc *gen.Service, adminPurpose bool) {
 	if svc.AuthGoogle != 1 {
 		http.Error(w, "Google-innlogging ikke aktivert", http.StatusForbidden)
 		return
@@ -63,7 +87,12 @@ func (h *GoogleHandlers) InitiateLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "intern feil", http.StatusInternalServerError)
 		return
 	}
-	state := SignState(h.cfg.OIDCStateSecret, svc.ID, nonce)
+	var state string
+	if adminPurpose {
+		state = signAdminState(h.cfg.OIDCStateSecret, svc.ID, nonce)
+	} else {
+		state = SignState(h.cfg.OIDCStateSecret, svc.ID, nonce)
+	}
 	oauthCfg := &oauth2.Config{
 		ClientID:    clientID,
 		Endpoint:    googleOAuth2.Endpoint,
@@ -91,7 +120,9 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "ugyldig state", http.StatusBadRequest)
 		return
 	}
-	svcID, ok := VerifyState(h.cfg.OIDCStateSecret, sc.Value)
+	// Admin-formålet leses bare fra den signerte staten, aldri fra query eller
+	// andre cookies.
+	svcID, adminPurpose, ok := parseState(h.cfg.OIDCStateSecret, sc.Value)
 	if !ok {
 		http.Error(w, "ugyldig HMAC", http.StatusBadRequest)
 		return
@@ -105,30 +136,54 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 		RedirectURL:  "https://" + r.Host + "/callback",
 		Scopes:       []string{oidc.ScopeOpenID, "email", "profile"},
 	}
+	// Feil etter at staten er kjent som admin auditeres som mislykket
+	// admin-innlogging, ikke bare som en HTTP-feil.
+	fail := func(status int, msg, details string) {
+		if adminPurpose {
+			h.auditAdminFailure(r, svc, "", details)
+		}
+		http.Error(w, msg, status)
+	}
 	oauth2Token, err := oauthCfg.Exchange(ctx, r.URL.Query().Get("code"))
 	if err != nil {
-		http.Error(w, "token-utveksling feilet", http.StatusUnauthorized)
+		fail(http.StatusUnauthorized, "token-utveksling feilet", "kodeutveksling feilet")
 		return
 	}
 	// Bug-fix: handle provider discovery error (brief silently ignored it)
 	provider, err := oidc.NewProvider(ctx, "https://accounts.google.com")
 	if err != nil {
-		http.Error(w, "OIDC discovery feilet", http.StatusInternalServerError)
+		fail(http.StatusInternalServerError, "OIDC discovery feilet", "OIDC discovery feilet")
 		return
 	}
 	rawIDToken, _ := oauth2Token.Extra("id_token").(string)
 	idToken, err := provider.Verifier(&oidc.Config{ClientID: clientID}).Verify(ctx, rawIDToken)
 	if err != nil {
-		http.Error(w, "id_token ugyldig", http.StatusUnauthorized)
+		fail(http.StatusUnauthorized, "id_token ugyldig", "id_token ugyldig")
 		return
 	}
-	// Bug-fix: correct JSON struct tags (brief had a single tag "email,name" for both fields)
-	var cl struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
-	}
+	var cl googleClaims
 	if err := idToken.Claims(&cl); err != nil {
-		http.Error(w, "kunne ikke lese claims", http.StatusUnauthorized)
+		fail(http.StatusUnauthorized, "kunne ikke lese claims", "kunne ikke lese claims")
+		return
+	}
+	h.finishCallback(w, r, svc, adminPurpose, cl)
+}
+
+// googleClaims er det vi trenger fra Googles id_token.
+type googleClaims struct {
+	Email         string `json:"email"`
+	Name          string `json:"name"`
+	EmailVerified bool   `json:"email_verified"`
+}
+
+// finishCallback er alt som skjer etter at id_token er verifisert og claims er
+// lest. Skilt ut fra HandleCallback slik at begge grenene kan testes uten
+// Google.
+func (h *GoogleHandlers) finishCallback(w http.ResponseWriter, r *http.Request, svc *gen.Service, adminPurpose bool, cl googleClaims) {
+	ctx := r.Context()
+	if adminPurpose {
+		clearCookie(w, "oidc_state")
+		h.completeAdminLogin(w, r, svc, cl)
 		return
 	}
 	user, err := h.findOrCreate(ctx, cl.Email, cl.Name, svc)
@@ -159,6 +214,50 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	h.aud.Log(ctx, audit.Event{Type: "google_oidc_login", AuthMethod: "google", Email: user.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: true})
 	http.Redirect(w, r, "/dispatch?token="+url.QueryEscape(at)+"&rt="+url.QueryEscape(rt)+"&service="+url.QueryEscape(svc.ID), http.StatusFound)
+}
+
+// auditAdminFailure skriver admin_google_login med success=0.
+func (h *GoogleHandlers) auditAdminFailure(r *http.Request, svc *gen.Service, email, details string) {
+	h.aud.Log(r.Context(), audit.Event{Type: "admin_google_login", AuthMethod: "google", Email: email, ServiceID: svc.ID, IP: ClientIP(r), UA: r.Header.Get("User-Agent"), Success: false, Details: details})
+}
+
+// completeAdminLogin avslutter en OIDC-flyt med admin-formål. Den slår bare opp
+// en eksisterende aktiv bruker: ingen auto-registrering og ingen tjenestepolicy
+// (admin er ikke bundet til en tjeneste). Rollen konge kreves med eksakt match,
+// og Google må ha bekreftet e-postadressen. Ingen JWT havner i URL-en;
+// sesjonen settes som cookie av AdminSessionStarter.
+func (h *GoogleHandlers) completeAdminLogin(w http.ResponseWriter, r *http.Request, svc *gen.Service, cl googleClaims) {
+	ctx := r.Context()
+	reject := func(email, details string) {
+		h.auditAdminFailure(r, svc, email, details)
+		http.Redirect(w, r, "/admin/login?err=ingen_tilgang", http.StatusSeeOther)
+	}
+	// Normalisert slik at oppslaget ikke avhenger av hvordan Google skriver adressen.
+	email := strings.ToLower(strings.TrimSpace(cl.Email))
+	if email == "" {
+		reject("", "mangler e-post i id_token")
+		return
+	}
+	if !cl.EmailVerified {
+		reject(email, "e-post ikke verifisert av Google")
+		return
+	}
+	user, err := h.queries.GetActiveUserByEmail(ctx, email)
+	if err != nil || !csvHasExact(user.Roles, "konge") {
+		reject(email, "ukjent, deaktivert eller mangler konge-rolle")
+		return
+	}
+	if h.adminSessions == nil {
+		slog.Error("google: admin-flyt uten AdminSessionStarter")
+		http.Error(w, "intern feil", http.StatusInternalServerError)
+		return
+	}
+	if err := h.adminSessions.StartAdminSession(w, r, user, svc.ID); err != nil {
+		slog.Error("google: kunne ikke starte admin-sesjon", "email", user.Email, "error", err)
+		http.Error(w, "intern feil", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 
 func (h *GoogleHandlers) findOrCreate(ctx context.Context, email, name string, svc *gen.Service) (gen.User, error) {

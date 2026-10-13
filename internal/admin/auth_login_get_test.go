@@ -27,8 +27,8 @@ func renderLoginGet(t *testing.T, query string) string {
 	return w.Body.String()
 }
 
-// HandleVerify og HandleGoogleCallback redirecter til /admin/login?err=<kode>
-// ved avvist innlogging (ugyldig_token, ingen_tilgang, ingen_token), men
+// HandleVerify og OIDC-callbacken (admin-formål) redirecter til
+// /admin/login?err=<kode> ved avvist innlogging (ugyldig_token, ingen_tilgang), men
 // HandleLoginGet ignorerte tidligere ?err= helt — brukeren ble bounce't
 // tilbake til en blank innloggingsside uten noen forklaring på hvorfor.
 func TestHandleLoginGet_ShowsErrorForKnownCode(t *testing.T) {

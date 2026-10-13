@@ -120,7 +120,17 @@ KAUTH_CORS_ORIGINS=https://app1.example.com,https://app2.example.com
 
 Mangler app-en på listen får browseren `No 'Access-Control-Allow-Origin' header is present` og refresh-runden feiler stille — klienten beholder gammelt refresh-token, neste forsøk trigger reuse-deteksjon og brukeren kastes til login. Symptomet ser ut som "logges ut etter 15 min" men ligger i nettverket, ikke i token-laget.
 
+En bokstavelig `*` avvises ved oppstart, og det samme gjelder alt som ikke er en ren origin.
+
+`POST /token` med `grant_type=refresh_token` sjekker også `Origin`-headeren. Kall uten `Origin` (server-til-server) går gjennom som før. Kall med `Origin` utenfor `KAUTH_CORS_ORIGINS` får `403 {"error":"invalid_origin"}` uten CORS-headere, og refresh-tokenet brukes ikke opp.
+
 Endre `.env` og restart kauth når du onboarder en ny SPA.
+
+### Lyttadresse og passord-login
+
+`KAUTH_HTTP_ADDR` er IP-adressen kauth binder til (IP-literal uten port; porten kommer fra `KAUTH_HTTP_PORT`). Default er `127.0.0.1`. Sett `0.0.0.0` eller `::` eksplisitt for å eksponere kauth på LAN. Vertsnavn eller ugyldig verdi stopper oppstart.
+
+`KAUTH_PASSWORD_LOGIN_ENABLED` er en global bryter for passord-login, av som standard. Bare `true` eller `false` godtas. Når den er av gir `POST /do-login` 403 og passordskjemaet skjules, uansett tjenestens `auth_password`. Påslag gir passord-login uten rate limit, så la den stå av med mindre du trenger den.
 
 ### Bakgrunnsbilde
 
@@ -148,7 +158,7 @@ Login-templaten setter automatisk `background: url('/static/polaris-hero.jpg') c
 Sjekkliste for en ny `auth_host` bak samme tunnel som resten av flåten:
 
 1. `cloudflared tunnel route dns --overwrite-dns <tunnel-id> <auth_host>`
-2. Legg til en ingress-rad i `/etc/cloudflared/config.yml` som peker `<auth_host>` mot `http://localhost:<KAUTH_HTTP_PORT>` — samme port som de andre auth-hostene.
+2. Legg til en ingress-rad i `/etc/cloudflared/config.yml` som peker `<auth_host>` mot `http://127.0.0.1:<KAUTH_HTTP_PORT>` — samme port som de andre auth-hostene.
 3. `cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate` før restart.
 4. `systemctl restart kauth` (henter ny service-rad inn i registry-cachen) og `systemctl restart cloudflared` (deler tunnel med alle andre tjenester — kort avbrudd for alle, ikke bare den nye).
 
@@ -259,7 +269,7 @@ Backup-en ligger i `scripts/backup-kauth-go.sh` — daglig kopi via cron klokken
 
 Logger går til journald via `log/slog` i strukturert format. Cleanup-jobber (magic-tokens, refresh-tokens, audit-events) kjører hver time som bakgrunns-goroutiner.
 
-Cloudflare Tunnel foran: kauth lytter på localhost, tunnelen terminerer TLS og setter klient-IP i `CF-Connecting-IP`-header. Null hull i brannmuren utover det.
+Cloudflare Tunnel foran: kauth lytter på `127.0.0.1` som standard (`KAUTH_HTTP_ADDR`), tunnelen terminerer TLS og setter klient-IP i `CF-Connecting-IP`-header. kauth stoler på `CF-Connecting-IP` bare når forbindelsen kommer fra loopback (cloudflared); ellers brukes TCP-peer-adressen. `X-Forwarded-For` og lignende headere ignoreres. Null hull i brannmuren utover det.
 
 ## Arkitektur i grove trekk
 

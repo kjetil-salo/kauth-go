@@ -31,3 +31,14 @@ func (i *Issuer) IssueAdminForTest(email, role string) string {
 	}
 	return tok
 }
+
+// SignForTest signerer vilkårlige claims med Issuer sin nøkkel, slik at tester
+// kan lage tokens Issue* aldri produserer (f.eks. et admin-token uten aud, som
+// en sesjon utstedt før aud ble innført). Kun ment for testoppsett.
+func (i *Issuer) SignForTest(claims Claims) string {
+	s, err := i.sign(claims)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}

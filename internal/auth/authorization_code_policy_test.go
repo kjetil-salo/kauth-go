@@ -76,7 +76,7 @@ func TestAuthorizationCodeGrant_RejectsUserWithoutRequiredRoleEvenWithValidCodeA
 	aud := audit.NewNoop()
 	refSvc := token.NewRefreshService(q, aud)
 	dispatchH := &auth.DispatchHandler{Registry: reg, Issuer: iss, Queries: q, DefaultSvcID: "minliste"}
-	tokenH := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud)
+	tokenH := auth.NewPasswordHandlers(q, iss, refSvc, reg, aud, true)
 
 	svcB, err := q.GetServiceByID(ctx, "minliste")
 	require.NoError(t, err)

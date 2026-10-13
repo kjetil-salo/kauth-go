@@ -208,7 +208,7 @@
         </a>
         {{end}}
 
-        {{if eq .Service.AuthPassword 1}}
+        {{if and .PasswordLoginEnabled (eq .Service.AuthPassword 1)}}
         {{if or $isSpekto (eq .Service.Theme "dark")}}<div class="divider">{{.T.Or}}</div>{{end}}
         <form method="post" action="/do-login">
             <input type="hidden" name="service_id" value="{{.Service.ID}}">

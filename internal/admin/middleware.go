@@ -20,14 +20,11 @@ func AdminAuthMiddleware(issuer *token.Issuer) func(http.Handler) http.Handler {
 				return
 			}
 
-			claims, err := issuer.Verify(cookie.Value)
+			// Formål og aud sjekkes i Verify: et access-token, eller et admin-token
+			// fra før aud ble innført, skal ikke gi admin-tilgang.
+			claims, err := issuer.Verify(cookie.Value, token.ExpectAdmin)
 			if err != nil {
 				respondUnauthorized(w, r, "ugyldig token: "+err.Error())
-				return
-			}
-
-			if claims.TokenUse != "admin" {
-				respondUnauthorized(w, r, "feil token-type")
 				return
 			}
 

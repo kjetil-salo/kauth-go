@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -8,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -24,14 +27,36 @@ type PasswordHandlers struct {
 	refresh *token.RefreshService
 	reg     *service.Registry
 	aud     *audit.Service
+	// passwordLoginEnabled er den globale bryteren (KAUTH_PASSWORD_LOGIN_ENABLED).
+	// Den gjelder /do-login uansett tjenestens auth_password.
+	passwordLoginEnabled bool
+	// corsOrigins er KAUTH_CORS_ORIGINS; brukes til Origin-sjekk på refresh-grant.
+	corsOrigins []string
 }
 
-func NewPasswordHandlers(q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service) *PasswordHandlers {
-	return &PasswordHandlers{queries: q, issuer: iss, refresh: ref, reg: reg, aud: aud}
+// WithCORSOrigins setter origin-allowlisten som refresh-grant sjekker mot.
+func (h *PasswordHandlers) WithCORSOrigins(origins []string) *PasswordHandlers {
+	h.corsOrigins = origins
+	if len(origins) == 0 {
+		slog.Warn("refresh-allowlist er tom: all refresh med Origin-header avvises (KAUTH_CORS_ORIGINS)")
+	} else {
+		slog.Info("refresh-allowlist lastet", "origins", len(origins))
+	}
+	return h
+}
+
+func NewPasswordHandlers(q *gen.Queries, iss *token.Issuer, ref *token.RefreshService, reg *service.Registry, aud *audit.Service, passwordLoginEnabled bool) *PasswordHandlers {
+	return &PasswordHandlers{queries: q, issuer: iss, refresh: ref, reg: reg, aud: aud, passwordLoginEnabled: passwordLoginEnabled}
 }
 
 // DoLogin — POST /do-login
 func (h *PasswordHandlers) DoLogin(w http.ResponseWriter, r *http.Request) {
+	// Før alt annet: ingen skjemaparsing, brukeroppslag eller bcrypt når
+	// bryteren er av.
+	if !h.passwordLoginEnabled {
+		http.Error(w, "passord-innlogging ikke aktivert", http.StatusForbidden)
+		return
+	}
 	_ = r.ParseForm()
 	email := strings.TrimSpace(r.FormValue("email"))
 	password := r.FormValue("password")
@@ -238,8 +263,34 @@ func scopeContains(scope, want string) bool {
 // RefreshToken — POST /token
 // Leser refresh token fra cookie FØR form-body (cookie prioriteres).
 func (h *PasswordHandlers) RefreshToken(w http.ResponseWriter, r *http.Request) {
-	_ = r.ParseForm()
 	ip, ua := ClientIP(r), r.Header.Get("User-Agent")
+
+	// Origin-sjekk FØR Rotate: et avvist kall skal ikke brenne tokenet. Uten
+	// Origin-header (server-til-server) går kallet gjennom som før. En tom
+	// Origin-header er en header som finnes, og avvises.
+	if vals, present := r.Header["Origin"]; present {
+		origin := ""
+		if len(vals) > 0 {
+			origin = vals[0]
+		}
+		if len(vals) > 1 || !OriginAllowed(h.corsOrigins, origin) {
+			// Ingen CORS-headere på avvisningen, selv om en middleware skulle ha satt dem.
+			for _, k := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"} {
+				w.Header().Del(k)
+			}
+			_ = r.ParseForm()
+			logged := sanitizeLogValue(strings.Join(vals, ","))
+			slog.Warn("refresh avvist: origin", "origin", logged, "ip", ip)
+			// Audit bare når et refresh-token faktisk er presentert, slik at
+			// anonyme kall ikke gir DB-skriving.
+			if c, err := r.Cookie("refresh_token"); (err == nil && c.Value != "") || r.PostFormValue("refresh_token") != "" {
+				h.aud.Log(r.Context(), audit.Event{Type: "refresh_invalid_origin", Details: "origin=" + logged, IP: ip, UA: ua, Success: false})
+			}
+			writeTokenError(w, http.StatusForbidden, "invalid_origin")
+			return
+		}
+	}
+	_ = r.ParseForm()
 
 	plain := ""
 	if c, err := r.Cookie("refresh_token"); err == nil {
@@ -264,17 +315,65 @@ func (h *PasswordHandlers) RefreshToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// WithoutCancel: revokering skal fullføres selv om klienten kobler fra,
+	// ellers kan barnet fra rotasjonen overleve.
+	revokeCtx := context.WithoutCancel(r.Context())
+
 	user, err := h.queries.GetActiveUserByEmail(r.Context(), result.Email)
 	if err != nil {
+		// Rotasjonen har allerede laget et barn; det må ikke overleve en deaktivert bruker.
+		// Forbigående DB-feil revokerer ikke, så brukeren slipper ny innlogging for SQLITE_BUSY.
+		if errors.Is(err, sql.ErrNoRows) {
+			h.refresh.RevokeFamily(revokeCtx, result.FamilyID, "user_inactive")
+			h.aud.Log(r.Context(), audit.Event{Type: "refresh_user_inactive", Email: result.Email, ServiceID: result.ServiceID, IP: ip, UA: ua, Success: false})
+			clearCookie(w, "refresh_token")
+		} else {
+			slog.Error("refresh: brukeroppslag feilet", "err", err)
+		}
 		writeTokenError(w, http.StatusUnauthorized, "invalid_or_expired_token")
 		return
 	}
 
-	svc := h.reg.ResolveOrDefault("", r.FormValue("service_id"), "")
+	// Tjenesten lagret på raden er autoritativ; service_id fra klienten er bare et hint.
+	// Avvisning på tjeneste eller policy revokerer familien, så barnet fra rotasjonen blir ubrukelig.
+	deny := func(eventType, reason, details string) {
+		h.refresh.RevokeFamily(revokeCtx, result.FamilyID, reason)
+		h.aud.Log(r.Context(), audit.Event{Type: eventType, Email: result.Email, ServiceID: result.ServiceID, Details: details, IP: ip, UA: ua, Success: false})
+		clearCookie(w, "refresh_token")
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+	}
+
+	var svc *gen.Service
+	if result.ServiceID != "" {
+		svc = h.reg.Resolve("", result.ServiceID, "")
+	}
+	if svc == nil {
+		deny("refresh_service_invalid", "service_invalid", "stored_service="+sanitizeLogValue(result.ServiceID))
+		return
+	}
+
+	// Informativt event (Success: true): forespørselen innvilges for lagret tjeneste,
+	// men avviket viser klienter som sender feil service_id.
+	if given := r.FormValue("service_id"); given != "" && given != result.ServiceID {
+		h.aud.Log(r.Context(), audit.Event{
+			Type: "refresh_service_mismatch", Email: result.Email, ServiceID: result.ServiceID,
+			Details: "stored=" + result.ServiceID + " given=" + sanitizeLogValue(given),
+			IP:      ip, UA: ua, Success: true,
+		})
+	}
+
+	if err := checkPolicy(user, svc); err != nil {
+		deny("refresh_policy_denied", "policy_denied", err.Error())
+		return
+	}
 
 	at, err := h.issuer.IssueAccess(user, *svc)
 	if err != nil {
-		http.Error(w, "intern feil", http.StatusInternalServerError)
+		// Barnet fra rotasjonen ville ellers overleve, og neste forsøk utløse reuse-deteksjon.
+		slog.Error("refresh: utstedelse av access-token feilet", "err", err)
+		h.refresh.RevokeFamily(revokeCtx, result.FamilyID, "issue_failed")
+		clearCookie(w, "refresh_token")
+		writeTokenError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	setAuthCookies(w, svc, at, result.NewToken)
@@ -296,4 +395,19 @@ func writeTokenError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
+}
+
+// sanitizeLogValue fjerner kontrolltegn og kutter til 200 tegn; verdien er
+// klientstyrt (Origin, service_id) og havner i logg og audit.
+func sanitizeLogValue(o string) string {
+	o = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, o)
+	if len(o) > 200 {
+		o = o[:200]
+	}
+	return strings.ToValidUTF8(o, "")
 }

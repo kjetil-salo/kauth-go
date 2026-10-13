@@ -3,6 +3,7 @@ package admin
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"html/template"
 	"net/http"
 	"os"
@@ -51,18 +52,17 @@ type loginPageData struct {
 }
 
 // loginErrorMessages oversetter ?err=-kodene som HandleVerify og
-// HandleGoogleCallback redirecter med til brukervendt tekst. Disse er ikke
+// OIDC-callbacken i auth (admin-formål) redirecter med til brukervendt tekst. Disse er ikke
 // et bruker-enumereringsproblem som i HandleLoginPost — her har brukeren
 // allerede fullført en ekte innlogging (magic-token eller Google), så det
 // er trygt og forventet å fortelle hvorfor admin-tilgang ble avvist.
 var loginErrorMessages = map[string]string{
 	"ugyldig_token": "Lenken er ugyldig eller utløpt. Prøv å logge inn på nytt.",
 	"ingen_tilgang": "Kontoen din har ikke tilgang til admin-panelet.",
-	"ingen_token":   "Mangler token i lenken. Prøv å logge inn på nytt.",
 }
 
 // HandleLoginGet rendrer innloggingssiden. En ?err=-parameter (satt av
-// HandleVerify/HandleGoogleCallback ved avvist innlogging) vises som
+// HandleVerify/OIDC-callbacken ved avvist innlogging) vises som
 // feilmelding i stedet for å bli stille ignorert.
 func (h *AuthHandler) HandleLoginGet(w http.ResponseWriter, r *http.Request) {
 	data := loginPageData{}
@@ -195,6 +195,21 @@ func (h *AuthHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Formålsbinding (ADN 9): et token utstedt for en tjeneste hører ikke hjemme
+	// i admin-panelet. Admin-tokens har alltid service_id NULL.
+	if mt.ServiceID != nil {
+		h.auditor.Log(ctx, audit.Event{
+			Type:    "admin_login",
+			Email:   mt.Email,
+			IP:      extractIP(r),
+			UA:      r.UserAgent(),
+			Success: false,
+			Details: "token utstedt for en tjeneste",
+		})
+		http.Redirect(w, r, "/admin/login?err=ugyldig_token", http.StatusSeeOther)
+		return
+	}
+
 	user, err := h.queries.GetActiveUserByEmail(ctx, mt.Email)
 	if err != nil || !hasRole(user.Roles, "konge") {
 		h.auditor.Log(ctx, audit.Event{
@@ -215,15 +230,7 @@ func (h *AuthHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "admin_token",
-		Value:    adminToken,
-		Path:     "/admin",
-		HttpOnly: true,
-		Secure:   os.Getenv("KAUTH_INSECURE_COOKIES") != "true",
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(h.cfg.AdminTokenTTL.Seconds()),
-	})
+	setAdminCookie(w, adminToken, h.cfg.AdminTokenTTL)
 
 	h.auditor.Log(ctx, audit.Event{
 		Type:    "admin_login",
@@ -239,7 +246,7 @@ func (h *AuthHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	// Logg kun hvis vi kan hente e-post fra eksisterende cookie.
 	if c, err := r.Cookie("admin_token"); err == nil {
-		if claims, err := h.issuer.Verify(c.Value); err == nil {
+		if claims, err := h.issuer.Verify(c.Value, token.ExpectAdmin); err == nil {
 			h.auditor.Log(r.Context(), audit.Event{
 				Type:    "admin_logout",
 				Email:   claims.Email,
@@ -262,53 +269,49 @@ func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
-// HandleGoogleInitiate — GET /admin/google-init
-// Redirecter til /social-login med intern redirect_uri slik at dispatcher
-// ruter admin-brukeren til /admin/google-callback etter Google-callback.
-// Bruker vanlig /callback (whitelistet hos Google) — ingen separat OAuth-URL.
-func (h *AuthHandler) HandleGoogleInitiate(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/social-login?redirect_uri=/admin/google-callback", http.StatusSeeOther)
+// HandleGoogleCallback — GET /admin/google-callback
+// Eldre inngang fra tiden da admin-sesjonen ble veksla fra et JWT i URL-en.
+// Admin-sesjonen settes nå bare i OIDC-callbacken (formål i signert state), så
+// denne ruten setter aldri cookie og ignorerer query helt. Ruten beholdes for
+// at bokmerker og flyter som pågår ved deploy lander på innloggingssiden.
+func (h *AuthHandler) HandleGoogleCallback(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
-// HandleGoogleCallback — GET /admin/google-callback (intern, ikke OAuth-callback)
-// Leser JWT fra ?token=, verifiserer signatur, sjekker konge-rolle,
-// utsteder admin_token-cookie og redirecter til /admin/users.
-func (h *AuthHandler) HandleGoogleCallback(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+// SessionStarter implementerer auth.AdminSessionStarter. Cookie, TTL og audit
+// for admin-sesjonen blir liggende her, slik at OIDC-callbacken i auth ikke
+// trenger å kjenne dem.
+type SessionStarter struct {
+	issuer  *token.Issuer
+	auditor *audit.Service
+	ttl     time.Duration
+}
 
-	rawToken := r.URL.Query().Get("token")
-	if rawToken == "" {
-		http.Redirect(w, r, "/admin/login?err=ingen_token", http.StatusSeeOther)
-		return
-	}
+func NewSessionStarter(issuer *token.Issuer, auditor *audit.Service, ttl time.Duration) *SessionStarter {
+	return &SessionStarter{issuer: issuer, auditor: auditor, ttl: ttl}
+}
 
-	claims, err := h.issuer.Verify(rawToken)
+// StartAdminSession utsteder admin-token, setter cookie og skriver audit.
+// Kalleren har verifisert aktiv bruker med rollen konge.
+func (s *SessionStarter) StartAdminSession(w http.ResponseWriter, r *http.Request, user gen.User, serviceID string) error {
+	adminToken, err := s.issuer.IssueAdmin(user, s.ttl)
 	if err != nil {
-		http.Redirect(w, r, "/admin/login?err=ugyldig_token", http.StatusSeeOther)
-		return
+		return fmt.Errorf("utstede admin-token: %w", err)
 	}
+	setAdminCookie(w, adminToken, s.ttl)
+	s.auditor.Log(r.Context(), audit.Event{
+		Type:       "admin_google_login",
+		AuthMethod: "google",
+		Email:      user.Email,
+		ServiceID:  serviceID,
+		IP:         extractIP(r),
+		UA:         r.UserAgent(),
+		Success:    true,
+	})
+	return nil
+}
 
-	user, err := h.queries.GetActiveUserByEmail(ctx, claims.Email)
-	if err != nil || !hasRole(user.Roles, "konge") {
-		h.auditor.Log(ctx, audit.Event{
-			Type:       "admin_google_login",
-			AuthMethod: "google",
-			Email:      claims.Email,
-			IP:         extractIP(r),
-			UA:         r.UserAgent(),
-			Success:    false,
-			Details:    "mangler konge-rolle eller ukjent bruker",
-		})
-		http.Redirect(w, r, "/admin/login?err=ingen_tilgang", http.StatusSeeOther)
-		return
-	}
-
-	adminToken, err := h.issuer.IssueAdmin(user, h.cfg.AdminTokenTTL)
-	if err != nil {
-		http.Error(w, "intern feil", http.StatusInternalServerError)
-		return
-	}
-
+func setAdminCookie(w http.ResponseWriter, adminToken string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "admin_token",
 		Value:    adminToken,
@@ -316,18 +319,8 @@ func (h *AuthHandler) HandleGoogleCallback(w http.ResponseWriter, r *http.Reques
 		HttpOnly: true,
 		Secure:   os.Getenv("KAUTH_INSECURE_COOKIES") != "true",
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(h.cfg.AdminTokenTTL.Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 	})
-
-	h.auditor.Log(ctx, audit.Event{
-		Type:       "admin_google_login",
-		AuthMethod: "google",
-		Email:      user.Email,
-		IP:         extractIP(r),
-		UA:         r.UserAgent(),
-		Success:    true,
-	})
-	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
 
 // hasRole sjekker om en kommaseparert roles-streng inneholder targetRole.
@@ -349,11 +342,7 @@ func generateToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// extractIP henter klient-IP fra Cloudflare → X-Forwarded-For → RemoteAddr.
+// extractIP delegerer til den felles IP-funksjonen slik at admin og auth aldri divergerer.
 func extractIP(r *http.Request) string {
-	return audit.ExtractIP(
-		r.Header.Get("CF-Connecting-IP"),
-		r.Header.Get("X-Forwarded-For"),
-		r.RemoteAddr,
-	)
+	return audit.ClientIP(r)
 }

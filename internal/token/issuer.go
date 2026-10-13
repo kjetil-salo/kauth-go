@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -194,28 +195,61 @@ func (i *Issuer) IssueIDToken(user gen.User, svc gen.Service, nonce string) (str
 	return i.sign(claims)
 }
 
+// AdminAudience er aud-verdien på admin-tokens. Admin-middleware krever den,
+// slik at et token utstedt for noe annet (eller en gammel admin-sesjon uten
+// aud) aldri slipper inn i admin-panelet.
+const AdminAudience = "kauth-admin"
+
+// Expect sier hva en kaller aksepterer i Verify. TokenUse er påkrevd: ingen
+// endepunkter skal godta «et gyldig kauth-JWT» generelt (ADN 9 pkt 1).
+// Audience er valgfri; er den satt, må tokenet bære akkurat den aud-verdien.
+type Expect struct {
+	TokenUse string
+	Audience string
+}
+
+var (
+	// ExpectAccess brukes av endepunkter som bare tar imot access-tokens.
+	ExpectAccess = Expect{TokenUse: "access"}
+	// ExpectAdmin brukes av admin-panelet.
+	ExpectAdmin = Expect{TokenUse: "admin", Audience: AdminAudience}
+)
+
 // IssueAdmin utsteder et admin-token. Hvis adminTTL <= 0 brukes Issuer sin standard adminTTL.
 func (i *Issuer) IssueAdmin(user gen.User, adminTTL time.Duration) (string, error) {
 	if adminTTL <= 0 {
 		adminTTL = i.adminTTL
 	}
-	return i.sign(i.buildClaims(user, adminTTL, "admin"))
+	claims := i.buildClaims(user, adminTTL, "admin")
+	claims.Audience = jwt.ClaimStrings{AdminAudience}
+	return i.sign(claims)
 }
 
-// Verify validerer et JWT-token og returnerer claims. Avviser utløpte tokens.
-func (i *Issuer) Verify(tokenStr string) (*Claims, error) {
+// Verify validerer signatur, issuer og utløp, og krever i tillegg forventet
+// token_use (og aud hvis expect.Audience er satt). Et token med feil formål
+// avvises selv om signaturen er gyldig.
+func (i *Issuer) Verify(tokenStr string, expect Expect) (*Claims, error) {
+	if expect.TokenUse == "" {
+		return nil, fmt.Errorf("forventet token_use må oppgis")
+	}
 	claims := &Claims{}
 	tok, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, fmt.Errorf("uventet signeringsmetode: %v", t.Header["alg"])
 		}
 		return i.publicKey, nil
-	}, jwt.WithIssuer(i.issuer), jwt.WithExpirationRequired())
+	}, jwt.WithIssuer(i.issuer), jwt.WithExpirationRequired(), jwt.WithValidMethods([]string{"RS256"}))
 	if err != nil {
 		return nil, fmt.Errorf("ugyldig token: %w", err)
 	}
 	if !tok.Valid {
 		return nil, fmt.Errorf("token er ikke gyldig")
+	}
+	if claims.TokenUse != expect.TokenUse {
+		return nil, fmt.Errorf("feil token_use: forventet %q", expect.TokenUse)
+	}
+	if expect.Audience != "" && !slices.Contains(claims.Audience, expect.Audience) {
+		return nil, fmt.Errorf("feil aud: forventet %q", expect.Audience)
 	}
 	return claims, nil
 }

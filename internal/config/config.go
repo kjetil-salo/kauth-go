@@ -7,6 +7,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -44,6 +47,14 @@ type Config struct {
 	AccessTokenTTL time.Duration
 	AdminTokenTTL  time.Duration
 
+	// PasswordLoginEnabled er en global bryter over tjenestenes auth_password.
+	// Default av: passord-login er ikke i bruk i prod, og skal ikke kunne
+	// slås på ved en feiltakelse i en tjenesterad alene.
+	PasswordLoginEnabled bool
+
+	// HTTPAddr er en IP-literal. Default er loopback slik at kauth ikke er
+	// nåbar fra LAN uten eksplisitt valg (0.0.0.0 / ::).
+	HTTPAddr    string
 	HTTPPort    string
 	CORSOrigins []string
 	LogLevel    string
@@ -166,14 +177,38 @@ func Load() (*Config, error) {
 	}
 	c.AdminTokenTTL = d
 
+	// Bare "true"/"false" (case-sensitivt) godtas. En skrivefeil som "yes"
+	// eller "TRUE" skal stoppe oppstart framfor å stille velge en side av
+	// en sikkerhetsbryter.
+	switch v := os.Getenv("KAUTH_PASSWORD_LOGIN_ENABLED"); v {
+	case "", "false":
+		c.PasswordLoginEnabled = false
+	case "true":
+		c.PasswordLoginEnabled = true
+	default:
+		errs = append(errs, `ugyldig KAUTH_PASSWORD_LOGIN_ENABLED: må være "true" eller "false"`)
+	}
+
 	c.HTTPPort = optional("KAUTH_HTTP_PORT", "8080")
+	addr, err := parseHTTPAddr(os.LookupEnv("KAUTH_HTTP_ADDR"))
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	c.HTTPAddr = addr
 	c.LogLevel = optional("KAUTH_LOG_LEVEL", "info")
 
 	if cors := os.Getenv("KAUTH_CORS_ORIGINS"); cors != "" {
 		for _, o := range strings.Split(cors, ",") {
-			if t := strings.TrimSpace(o); t != "" {
-				c.CORSOrigins = append(c.CORSOrigins, t)
+			t := strings.TrimSpace(o)
+			if t == "" {
+				continue
 			}
+			n, err := normalizeCORSOrigin(t, os.Getenv("KAUTH_INSECURE_COOKIES") == "true")
+			if err != nil {
+				errs = append(errs, "ugyldig KAUTH_CORS_ORIGINS: "+err.Error())
+				continue
+			}
+			c.CORSOrigins = append(c.CORSOrigins, n)
 		}
 	}
 
@@ -181,6 +216,28 @@ func Load() (*Config, error) {
 		return nil, errors.New("konfigurasjonsfeil:\n  - " + strings.Join(errs, "\n  - "))
 	}
 	return c, nil
+}
+
+// parseHTTPAddr godtar kun en ren IP-literal. Vertsnavn avvises fordi
+// oppslag kan gi en annen adresse enn operatøren tror, og port hører til
+// KAUTH_HTTP_PORT. Satt-men-blank er en feil, ikke "bruk default", slik at
+// en skrivefeil i miljøfilen ikke stille gir en annen eksponering.
+func parseHTTPAddr(v string, set bool) (string, error) {
+	if !set {
+		return "127.0.0.1", nil
+	}
+	ip, err := netip.ParseAddr(v)
+	// Zone-ID binder til ett grensesnitt og gjør adressen uforutsigbar mellom maskiner.
+	if err != nil || ip.Zone() != "" {
+		return "", fmt.Errorf("ugyldig KAUTH_HTTP_ADDR %q: må være en IP-adresse uten port, zone eller vertsnavn (f.eks. 127.0.0.1, ::1, 0.0.0.0)", v)
+	}
+	// ::ffff:127.0.0.1 skal oppføre seg (og logges) som 127.0.0.1.
+	return ip.Unmap().String(), nil
+}
+
+// ListenAddr bygger host:port med riktig hakeparentes-håndtering for IPv6.
+func ListenAddr(host, port string) string {
+	return net.JoinHostPort(host, port)
 }
 
 func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
@@ -253,4 +310,31 @@ func parseISO8601(s string) (time.Duration, error) {
 		}
 	}
 	return total, nil
+}
+
+// normalizeCORSOrigin validerer en origin og returnerer kanonisk form
+// (scheme://host med små bokstaver). Nettlesere sender Origin uten sti,
+// så alt annet ville aldri matchet og er sannsynligvis en skrivefeil.
+func normalizeCORSOrigin(raw string, allowHTTP bool) (string, error) {
+	if strings.Contains(raw, "*") {
+		return "", fmt.Errorf(`wildcard "*" støttes ikke, list origins eksplisitt (fant %q)`, raw)
+	}
+	if strings.EqualFold(raw, "null") {
+		return "", errors.New(`"null" kan aldri være tillatt origin`)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("kunne ikke tolke %q: %v", raw, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && !(scheme == "http" && allowHTTP) {
+		return "", fmt.Errorf("%q må bruke https (http kun med KAUTH_INSECURE_COOKIES=true)", raw)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("%q mangler vert", raw)
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil || u.Opaque != "" {
+		return "", fmt.Errorf("%q må være ren origin (scheme://vert[:port], uten sti, query, fragment eller userinfo)", raw)
+	}
+	return strings.ToLower(scheme + "://" + u.Host), nil
 }
