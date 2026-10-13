@@ -27,7 +27,7 @@ import (
 type ServicesHandler struct {
 	queries  *gen.Queries
 	registry *service.Registry
-	auditor  *audit.Service
+	auditor  auditLogger
 	listTpl  *template.Template
 	editTpl  *template.Template
 }
@@ -35,7 +35,7 @@ type ServicesHandler struct {
 func NewServicesHandler(
 	queries *gen.Queries,
 	registry *service.Registry,
-	auditor *audit.Service,
+	auditor auditLogger,
 ) *ServicesHandler {
 	listTpl := template.Must(template.ParseFiles("templates/admin/services.html"))
 	editTpl := template.Must(template.ParseFiles("templates/admin/service-edit.html"))
@@ -48,14 +48,14 @@ func NewServicesHandler(
 	}
 }
 
-// invalidateCache returnerer redirect-målet. Lagringen er allerede utført og rulles
-// ikke tilbake; ellers ville admin tro at tjenesten er aktiv når cachen er utdatert.
-func (h *ServicesHandler) invalidateCache(r *http.Request, serviceID string) string {
+// invalidateCache returnerer false når cachen er utdatert. Lagringen er allerede
+// utført og rulles ikke tilbake; ellers ville admin tro at tjenesten er aktiv.
+func (h *ServicesHandler) invalidateCache(r *http.Request, serviceID string) bool {
 	if err := h.registry.Invalidate(r.Context()); err != nil {
 		slog.Error("admin: cache-invalidering feilet etter lagring av tjeneste", "service_id", serviceID, "error", err)
-		return "/admin/services?warn=cache"
+		return false
 	}
-	return "/admin/services"
+	return true
 }
 
 // HandleList viser alle tjenester (aktive og inaktive).
@@ -67,11 +67,10 @@ func (h *ServicesHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Bare faste koder gir tekst i malen; verdien fra query-strengen speiles aldri.
-	warn := ""
-	if r.URL.Query().Get("warn") == "cache" {
-		warn = "cache"
-	}
-	_ = h.listTpl.Execute(w, map[string]interface{}{"Services": services, "Warn": warn})
+	warns := warnFlags(r, "cache", "audit")
+	_ = h.listTpl.Execute(w, map[string]interface{}{
+		"Services": services, "WarnCache": warns["cache"], "WarnAudit": warns["audit"],
+	})
 }
 
 // HandleNew rendrer skjema for ny tjeneste med fornuftige standardverdier.
@@ -130,13 +129,13 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectTo := h.invalidateCache(r, svcID)
+	cacheOK := h.invalidateCache(r, svcID)
 
 	details := "service_created"
 	if uploaded {
 		details = "service_created bg_image_uploaded=" + uploadedPath
 	}
-	h.auditor.Log(r.Context(), audit.Event{
+	auditOK := logAdminWrite(r.Context(), h.auditor, audit.Event{
 		Type:      "service_created",
 		ServiceID: svcID,
 		IP:        extractIP(r),
@@ -144,7 +143,7 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		Details:   details,
 		Success:   true,
 	})
-	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+	http.Redirect(w, r, savedRedirect(cacheOK, auditOK), http.StatusSeeOther)
 }
 
 // HandleEdit rendrer redigeringsskjema for eksisterende tjeneste.
@@ -222,13 +221,13 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectTo := h.invalidateCache(r, id)
+	cacheOK := h.invalidateCache(r, id)
 
 	details := "service_edited"
 	if uploaded {
 		details = "service_edited bg_image_uploaded=" + uploadedPath
 	}
-	h.auditor.Log(r.Context(), audit.Event{
+	auditOK := logAdminWrite(r.Context(), h.auditor, audit.Event{
 		Type:      "service_edited",
 		ServiceID: id,
 		IP:        extractIP(r),
@@ -236,7 +235,7 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		Details:   details,
 		Success:   true,
 	})
-	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+	http.Redirect(w, r, savedRedirect(cacheOK, auditOK), http.StatusSeeOther)
 }
 
 // handleBgImageUpload leser bg_image_upload fra multipart-skjema.

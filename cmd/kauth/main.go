@@ -165,7 +165,7 @@ func main() {
 
 		// Beskyttede admin-ruter
 		r.Group(func(r chi.Router) {
-			r.Use(admin.AdminAuthMiddleware(issuer))
+			r.Use(admin.AdminAuthMiddleware(issuer, queries))
 
 			// Root redirect
 			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
