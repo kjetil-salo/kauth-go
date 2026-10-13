@@ -40,6 +40,40 @@ func SameOrigin(r *http.Request) bool {
 	return ok
 }
 
+// Middleware krever samme origin på alle ikke-sikre metoder. GET, HEAD og
+// OPTIONS slippes gjennom uendret (K12). Avvisning gir fast tekst uten at next
+// kalles, og uten audit: en forfalsket forespørsel skal ikke kunne fylle loggen.
+func Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !SameOrigin(r) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// LogoutAllowed avgjør om GET /logout kan revokere og slette cookies. Cross-site
+// underressurser (img, fetch) og iframe skal ikke kunne logge brukeren ut
+// stille, men synlig toppnivå-navigasjon er en bevisst handling (PB3).
+// Manglende Sec-Fetch-Site (eldre klient, curl) behandles som navigasjon.
+func LogoutAllowed(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "same-site", "none":
+		return true
+	case "cross-site":
+		dest := r.Header.Get("Sec-Fetch-Dest")
+		return r.Header.Get("Sec-Fetch-Mode") == "navigate" && (dest == "" || dest == "document")
+	}
+	// Ukjent verdi: fail-closed.
+	return false
+}
+
 // insecure er lokal utvikling og eval: http godtas bare der, med samme bryter
 // som cookie-koden bruker. Bak Cloudflare Tunnel er r.TLS alltid nil, så
 // skjemaet kan ikke leses fra forespørselen.

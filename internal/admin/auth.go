@@ -115,7 +115,7 @@ func (h *AuthHandler) HandleLoginPost(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 	ctx := r.Context()
-	email := token.NormalizeEmail(r.FormValue("email"))
+	email := token.NormalizeEmail(r.PostFormValue("email"))
 	if !token.ValidEmail(email) {
 		return nil
 	}

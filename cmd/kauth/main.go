@@ -20,6 +20,7 @@ import (
 	"github.com/zral/kauth-go/internal/auth"
 	"github.com/zral/kauth-go/internal/config"
 	"github.com/zral/kauth-go/internal/db"
+	"github.com/zral/kauth-go/internal/fetchmeta"
 	"github.com/zral/kauth-go/internal/jobs"
 	"github.com/zral/kauth-go/internal/mail"
 	"github.com/zral/kauth-go/internal/service"
@@ -152,6 +153,8 @@ func main() {
 
 	// ── Admin-panel ───────────────────────────────────────────────────────────
 	r.Route("/admin", func(r chi.Router) {
+		// Først, slik at både åpne og beskyttede POST krever samme origin (M6).
+		r.Use(fetchmeta.Middleware)
 		// Åpne admin-ruter (ingen auth-middleware)
 		r.Get("/login", adminAuthH.HandleLoginGet)
 		r.Post("/login", adminAuthH.HandleLoginPost)

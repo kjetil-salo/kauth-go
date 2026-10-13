@@ -155,11 +155,11 @@ func (h *UsersHandler) HandleNew(w http.ResponseWriter, r *http.Request) {
 // HandleCreate oppretter ny bruker fra POST-skjema.
 func (h *UsersHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	email := strings.TrimSpace(strings.ToLower(r.FormValue("email")))
-	password := r.FormValue("password")
-	name := strings.TrimSpace(r.FormValue("name"))
-	roles := strings.TrimSpace(r.FormValue("roles"))
-	orgs := strings.TrimSpace(r.FormValue("orgs"))
+	email := strings.TrimSpace(strings.ToLower(r.PostFormValue("email")))
+	password := r.PostFormValue("password")
+	name := strings.TrimSpace(r.PostFormValue("name"))
+	roles := strings.TrimSpace(r.PostFormValue("roles"))
+	orgs := strings.TrimSpace(r.PostFormValue("orgs"))
 
 	if email == "" {
 		h.renderEditError(w, gen.User{Roles: roles, Orgs: orgs}, true, email, "E-post er påkrevd.")
@@ -250,9 +250,9 @@ func (h *UsersHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = r.ParseForm()
-	name := strings.TrimSpace(r.FormValue("name"))
-	roles := strings.TrimSpace(r.FormValue("roles"))
-	orgs := strings.TrimSpace(r.FormValue("orgs"))
+	name := strings.TrimSpace(r.PostFormValue("name"))
+	roles := strings.TrimSpace(r.PostFormValue("roles"))
+	orgs := strings.TrimSpace(r.PostFormValue("orgs"))
 
 	var namePtr *string
 	if name != "" {
