@@ -87,6 +87,20 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		Secure:   os.Getenv("KAUTH_INSECURE_COOKIES") != "true",
 		SameSite: http.SameSiteLaxMode,
 	}
+	cleared := false
+	clearRedirect := func() {
+		if !cleared {
+			cleared = true
+			http.SetCookie(w, clearRedirectCookie)
+		}
+	}
+
+	// En redirect_uri-cookie slettes uansett hvilket nivå som ruter, også
+	// OIDC-nivå 0 som aldri leser den: ellers overlever en plantet cookie en
+	// OIDC-runde og slår til ved neste vanlige innlogging.
+	if _, err := r.Cookie("redirect_uri"); err == nil {
+		clearRedirect()
+	}
 
 	// Nivå 0: standard OIDC authorization_code-flyt. oidc_authz-cookien ble
 	// satt av LoginHandler.ServeLogin når forespørselen inneholdt
@@ -145,24 +159,15 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Nivå 1: eksplisitt redirect_uri fra cookie
+	// Nivå 1: eksplisitt redirect_uri fra cookie. Cookien er usignert og kan
+	// plantes av hvem som helst via ?redirect_uri=, så bare en verdi som er
+	// eksakt lik en registrert callback_url godtas. Ingen intern-sti-gren:
+	// nettlesere tolker `/\evil.example` som `//evil.example`, så enhver
+	// prefiksvurdering av stier er en open redirect. Alt annet ignoreres og
+	// rutingen faller videre til nivå 2-5.
 	if redirectURI := readRedirectCookie(r); redirectURI != "" {
-		// Intern path (starter med / men ikke //) → ingen allowlist-sjekk nødvendig.
-		// Dobbel-skråstrek (//) ville vært protokoll-relativ URL og potensielt open redirect.
-		if strings.HasPrefix(redirectURI, "/") && !strings.HasPrefix(redirectURI, "//") {
-			http.SetCookie(w, clearRedirectCookie)
-			sep := "?"
-			if strings.Contains(redirectURI, "?") {
-				sep = "&"
-			}
-			http.Redirect(w, r, redirectURI+sep+"token="+url.QueryEscape(jwtToken), http.StatusSeeOther)
-			return
-		}
-		// Ekstern URL → eksisterende allowlist-sjekk
-		allSvcs := h.Registry.All()
-		for _, svc := range allSvcs {
+		for _, svc := range h.Registry.All() {
 			if h.Registry.IsAllowedCallback(svc, redirectURI) {
-				http.SetCookie(w, clearRedirectCookie)
 				http.Redirect(w, r, appendTokenAndRT(redirectURI, jwtToken, rt), http.StatusSeeOther)
 				return
 			}
@@ -176,7 +181,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 	// havner da på feil tjeneste.
 	if svcID := q.Get("service"); svcID != "" {
 		if svc := h.Registry.Resolve("", svcID, ""); svc != nil {
-			http.SetCookie(w, clearRedirectCookie)
+			clearRedirect()
 			http.Redirect(w, r, appendTokenAndRT(svc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 			return
 		}
@@ -191,7 +196,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		allSvcs := h.Registry.All()
 		for _, svc := range allSvcs {
 			if svc.AuthHost != nil && strings.ToLower(*svc.AuthHost) == hostLc {
-				http.SetCookie(w, clearRedirectCookie)
+				clearRedirect()
 				http.Redirect(w, r, appendTokenAndRT(svc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 				return
 			}
@@ -206,7 +211,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		}
 		for _, org := range claims.Org {
 			if org == *svc.DefaultOrg {
-				http.SetCookie(w, clearRedirectCookie)
+				clearRedirect()
 				http.Redirect(w, r, appendTokenAndRT(svc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 				return
 			}
@@ -216,7 +221,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 	// Nivå 5: fallback til default-tjenestens callback
 	defaultSvc := h.Registry.ResolveOrDefault("", h.DefaultSvcID, "")
 	if defaultSvc != nil {
-		http.SetCookie(w, clearRedirectCookie)
+		clearRedirect()
 		http.Redirect(w, r, appendTokenAndRT(defaultSvc.CallbackUrl, jwtToken, rt), http.StatusSeeOther)
 		return
 	}
