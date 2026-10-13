@@ -35,16 +35,12 @@ func ClientIP(r *http.Request) string {
 
 // CORSMiddleware setter Access-Control-Allow-* headere når origin matcher allowlisten.
 // Tom origins-liste betyr ingen CORS-headere — ingen wildcard-fallback.
-// "*" i listen tillater alle origins eksplisitt.
+// Wildcard støttes ikke (config.Load avviser "*"); en origin må stå eksakt i listen.
 func CORSMiddleware(origins []string) func(http.Handler) http.Handler {
-	allowed := make(map[string]bool)
-	for _, o := range origins {
-		allowed[strings.TrimSpace(o)] = true
-	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
-			if origin != "" && (allowed["*"] || allowed[origin]) {
+			if OriginAllowed(origins, origin) {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 				w.Header().Set("Vary", "Origin")
@@ -63,3 +59,17 @@ func CORSMiddleware(origins []string) func(http.Handler) http.Handler {
 // Logger og Recoverer er re-eksporter av chi/middleware for enklere import i main.
 var Logger = chimiddleware.Logger
 var Recoverer = chimiddleware.Recoverer
+
+// OriginAllowed sjekker en Origin-header mot allowlisten med eksakt match.
+// "null" og tom streng godtas aldri, selv om noen skulle ha lagt dem i listen.
+func OriginAllowed(origins []string, origin string) bool {
+	if origin == "" || origin == "null" {
+		return false
+	}
+	for _, o := range origins {
+		if strings.TrimSpace(o) == origin {
+			return true
+		}
+	}
+	return false
+}

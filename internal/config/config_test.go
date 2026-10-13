@@ -81,3 +81,52 @@ func TestLoad_PasswordLoginEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_CORSOrigins(t *testing.T) {
+	setMinimalEnv(t)
+	for _, v := range []string{"*", "https://a.example,*", "https://*.x", "*.x", "https://a.example, * ",
+		"null", "NULL", "http://a.example", "a.example", "https://", "https://a.example/path",
+		"https://a.example?x=1", "https://a.example#f", "https://u@a.example", "ftp://a.example"} {
+		t.Run("avvises "+v, func(t *testing.T) {
+			t.Setenv("KAUTH_CORS_ORIGINS", v)
+			_, err := Load()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "KAUTH_CORS_ORIGINS")
+		})
+	}
+	t.Run("ren liste", func(t *testing.T) {
+		t.Setenv("KAUTH_CORS_ORIGINS", "https://a.example, https://b.example")
+		c, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://a.example", "https://b.example"}, c.CORSOrigins)
+	})
+	t.Run("tom liste", func(t *testing.T) {
+		t.Setenv("KAUTH_CORS_ORIGINS", "")
+		c, err := Load()
+		require.NoError(t, err)
+		assert.Empty(t, c.CORSOrigins)
+	})
+}
+
+func TestLoad_CORSOrigins_Normalisering(t *testing.T) {
+	setMinimalEnv(t)
+	t.Run("prod-listen godtas", func(t *testing.T) {
+		t.Setenv("KAUTH_CORS_ORIGINS", "https://kjeller.lilleklo.work, https://analyse.klarsyn.net, https://spekto.live, https://wire.spekto.live")
+		c, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://kjeller.lilleklo.work", "https://analyse.klarsyn.net", "https://spekto.live", "https://wire.spekto.live"}, c.CORSOrigins)
+	})
+	t.Run("trailing slash og store bokstaver normaliseres", func(t *testing.T) {
+		t.Setenv("KAUTH_CORS_ORIGINS", "HTTPS://Spekto.Live/,https://a.example:8443")
+		c, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"https://spekto.live", "https://a.example:8443"}, c.CORSOrigins)
+	})
+	t.Run("http kun med insecure cookies", func(t *testing.T) {
+		t.Setenv("KAUTH_INSECURE_COOKIES", "true")
+		t.Setenv("KAUTH_CORS_ORIGINS", "http://localhost:3000")
+		c, err := Load()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"http://localhost:3000"}, c.CORSOrigins)
+	})
+}

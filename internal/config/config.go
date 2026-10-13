@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -188,9 +189,16 @@ func Load() (*Config, error) {
 
 	if cors := os.Getenv("KAUTH_CORS_ORIGINS"); cors != "" {
 		for _, o := range strings.Split(cors, ",") {
-			if t := strings.TrimSpace(o); t != "" {
-				c.CORSOrigins = append(c.CORSOrigins, t)
+			t := strings.TrimSpace(o)
+			if t == "" {
+				continue
 			}
+			n, err := normalizeCORSOrigin(t, os.Getenv("KAUTH_INSECURE_COOKIES") == "true")
+			if err != nil {
+				errs = append(errs, "ugyldig KAUTH_CORS_ORIGINS: "+err.Error())
+				continue
+			}
+			c.CORSOrigins = append(c.CORSOrigins, n)
 		}
 	}
 
@@ -270,4 +278,31 @@ func parseISO8601(s string) (time.Duration, error) {
 		}
 	}
 	return total, nil
+}
+
+// normalizeCORSOrigin validerer en origin og returnerer kanonisk form
+// (scheme://host med små bokstaver). Nettlesere sender Origin uten sti,
+// så alt annet ville aldri matchet og er sannsynligvis en skrivefeil.
+func normalizeCORSOrigin(raw string, allowHTTP bool) (string, error) {
+	if strings.Contains(raw, "*") {
+		return "", fmt.Errorf(`wildcard "*" støttes ikke, list origins eksplisitt (fant %q)`, raw)
+	}
+	if strings.EqualFold(raw, "null") {
+		return "", errors.New(`"null" kan aldri være tillatt origin`)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("kunne ikke tolke %q: %v", raw, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && !(scheme == "http" && allowHTTP) {
+		return "", fmt.Errorf("%q må bruke https (http kun med KAUTH_INSECURE_COOKIES=true)", raw)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("%q mangler vert", raw)
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil || u.Opaque != "" {
+		return "", fmt.Errorf("%q må være ren origin (scheme://vert[:port], uten sti, query, fragment eller userinfo)", raw)
+	}
+	return strings.ToLower(scheme + "://" + u.Host), nil
 }
