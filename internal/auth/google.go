@@ -122,11 +122,12 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	// Admin-formålet leses bare fra den signerte staten, aldri fra query eller
 	// andre cookies.
-	svcID, adminPurpose, ok := parseState(h.cfg.OIDCStateSecret, sc.Value)
+	claims, ok := parseState(h.cfg.OIDCStateSecret, sc.Value)
 	if !ok {
 		http.Error(w, "ugyldig HMAC", http.StatusBadRequest)
 		return
 	}
+	svcID, adminPurpose := claims.ServiceID, claims.Admin
 	svc := h.reg.ResolveOrDefault(r.Host, svcID, "")
 	clientID, clientSecret := googleCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{

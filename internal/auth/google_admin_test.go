@@ -181,10 +181,10 @@ func TestInitiateAdminLogin_SignedAdminStateNoRedirectCookie(t *testing.T) {
 
 	sc := cookieNamed(w, "oidc_state")
 	require.NotNil(t, sc)
-	svc, admin, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
+	claims, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
 	require.True(t, ok)
-	require.True(t, admin)
-	require.Equal(t, "klarsyn", svc)
+	require.True(t, claims.Admin)
+	require.Equal(t, "klarsyn", claims.ServiceID)
 
 	loc, err := url.Parse(w.Header().Get("Location"))
 	require.NoError(t, err)
@@ -203,9 +203,9 @@ func TestInitiateLogin_StateIsNeverAdminFromQuery(t *testing.T) {
 
 	sc := cookieNamed(w, "oidc_state")
 	require.NotNil(t, sc)
-	_, admin, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
+	claims, ok := parseState(f.cfg.OIDCStateSecret, sc.Value)
 	require.True(t, ok)
-	require.False(t, admin)
+	require.False(t, claims.Admin)
 }
 
 // Callbacken avgjør formål bare fra signert state: en vanlig state der
