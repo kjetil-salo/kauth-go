@@ -220,6 +220,20 @@ func TestMagicRedeem_DeactivatedUserAutoRegister_AccessDenied(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
+// Teknisk feil ved auto-register (ikke unik-brudd) er en intern feil, ikke et avslag.
+func TestMagicRedeem_CreateUserTechnicalFailure_500(t *testing.T) {
+	f := newConfirmFixture(t)
+	f.seed(t, "tok1", "svcauto", 15*time.Minute)
+	_, err := f.sqldb.Exec("PRAGMA foreign_keys = OFF")
+	require.NoError(t, err)
+	_, err = f.sqldb.Exec("DROP TABLE users")
+	require.NoError(t, err)
+
+	w := f.do(http.MethodPost, "/magic-login/tok1", sameOrigin)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.Empty(t, w.Result().Cookies())
+}
+
 func TestMagicConfirmPost_SameOrigin_Consumes(t *testing.T) {
 	f := newConfirmFixture(t)
 	f.seed(t, "tok1", "svca", 15*time.Minute)
