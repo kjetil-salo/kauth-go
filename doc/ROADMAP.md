@@ -122,7 +122,7 @@ Alvorlighet: **K** kritisk · **H** høy · **M** middels · **L** lav. «Prod»
 
 | Fase | Innhold | Risikoer | Est. | DSF-feature |
 |---|---|---|---|---|
-| **0 — Akutt herding** | Merge origin → prod; K1 intern-sti-allowlist; K2 admin-handoff + `Verify` med forventet `token_use`/`aud`; K3 redigerende logger + rydd journald; H1 skjemabug + sjekk av prod-data; H2 refresh-binding + policy; H7 avvis CORS-`*` + Origin-sjekk på `/token`; M4 bind 127.0.0.1 + fjern RealIP; M5 sikkerhetsheadere inkl. `Referrer-Policy`; M10 passord-kill-switch; L4 | K1–K3, H1–H3, H7, M4, M5, M10, L4, L5 | 3–5 | 007 |
+| **0 — Akutt herding** | Merge origin → prod; K1 intern-sti-allowlist; K2 admin-handoff + `Verify` med forventet `token_use`/`aud`; K3 redigerende logger + rydd journald; H1 skjemabug + sjekk av prod-data; H2 refresh-binding + policy; H7 avvis CORS-`*` + Origin-sjekk på `/token`; M4 bind 127.0.0.1 + fjern RealIP; M5 sikkerhetsheadere inkl. `Referrer-Policy`; M10 passord-kill-switch; L4 | K1–K3, H1–H3, H7, M4, M5, M10, L4, L5 | 3–5 (faktisk ca. 2 t) | 007 ✔ |
 | **1 — Herd eksisterende flyter** | Utløpstid (`iat`) i signert OIDC-state; full formålsbinding magic-token ↔ tjeneste med eksplisitt `purpose`-kolonne i stedet for `service_id IS NULL` (fra 007-review); Upstream nonce + PKCE (Google/MS); `email_verified`/`xms_edov`/`tid`; refresh i én transaksjon + revoke ved logout/deaktivering; `aud`+`jti` på alle tokens; magic link: bekreftelsesside, hashing, limiter, tjenestebinding; admin-CSRF (og `PostFormValue` i admin-skrivehandlere, fra 007 F4); CORS-allowlist per tjeneste og Origin-sjekk mot RT-ens lagrede tjeneste før rotasjon, samt audit og senere avvisning av cookie-refresh uten Origin (fra 007 F7); audit-kø; admin-middleware mot DB; legacy-av-bryter per tjeneste | H4–H6, M1–M3, M6, M7, M9, L1–L3, L7 | 7–11 | 008–010 |
 | **2 — Stabil identitet** | `user_identities(user_id, provider, issuer, subject)` unik på `(issuer, subject)`; stabil intern ID; e-postnormalisering; migrering med kollisjonsrapport; `sub_format` per tjeneste; eksplisitt kobling/frakobling og recovery (B1, B2) | P-funnene, M11 | 6–9 | 011–012 |
 | **3 — Felles føderert innlogging** | `FederatedLoginService` + provider-grensesnitt; Google/MS refaktorert inn (gamle handlere kjører side om side til de er verifisert); `checkPolicy` og utstedelse ett sted | — | 4–6 | 013 |
@@ -130,6 +130,8 @@ Alvorlighet: **K** kritisk · **H** høy · **M** middels · **L** lav. «Prod»
 | **5 — Policy, admin-UX, nøkler og hemmeligheter** | Provider-admin og tilordning per tjeneste; `allow_magic_link` / `allowed_providers` / `require_federated_login`; nøkkelring med `kid`; secrets kryptert i hvile | M8, M12 | 5–8 | 015–016 |
 | **6 — Test, drift og release** | CI (fmt, vet, test, `-race`, govulncheck); E2E mot testleverandør; restore-test av backup; fuzzing av redirect/callback; oppdatert SECURITY.md/FEATURES.md; ekstern revisjon; `v1.0.0` | L6 | 5–8 | 017 |
 | | **Totalt** | | **35–55** | |
+
+Fase 0 (007) ble estimert til 3–5 utviklerdager og gjennomført på ca. 2 timer med autonom DSF-kjøring (deployet 2026-10-13). Estimatene for de senere fasene er ikke justert ennå. Én fase er for lite grunnlag til å kalibrere resten.
 
 Fase 0 er en forutsetning for alt annet og bør gå før noen klient endres. Fase 1 og 2 kan delvis overlappe; Fase 3 forutsetter Fase 2.
 
