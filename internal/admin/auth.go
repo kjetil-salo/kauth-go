@@ -50,10 +50,32 @@ type loginPageData struct {
 	Sent    bool
 }
 
-// HandleLoginGet rendrer innloggingssiden.
+// loginErrorMessages oversetter ?err=-kodene som HandleVerify og
+// HandleGoogleCallback redirecter med til brukervendt tekst. Disse er ikke
+// et bruker-enumereringsproblem som i HandleLoginPost — her har brukeren
+// allerede fullført en ekte innlogging (magic-token eller Google), så det
+// er trygt og forventet å fortelle hvorfor admin-tilgang ble avvist.
+var loginErrorMessages = map[string]string{
+	"ugyldig_token": "Lenken er ugyldig eller utløpt. Prøv å logge inn på nytt.",
+	"ingen_tilgang": "Kontoen din har ikke tilgang til admin-panelet.",
+	"ingen_token":   "Mangler token i lenken. Prøv å logge inn på nytt.",
+}
+
+// HandleLoginGet rendrer innloggingssiden. En ?err=-parameter (satt av
+// HandleVerify/HandleGoogleCallback ved avvist innlogging) vises som
+// feilmelding i stedet for å bli stille ignorert.
 func (h *AuthHandler) HandleLoginGet(w http.ResponseWriter, r *http.Request) {
+	data := loginPageData{}
+	if code := r.URL.Query().Get("err"); code != "" {
+		msg, known := loginErrorMessages[code]
+		if !known {
+			msg = "Innlogging feilet. Prøv igjen."
+		}
+		data.Message = msg
+		data.IsError = true
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = h.loginTpl.Execute(w, loginPageData{})
+	_ = h.loginTpl.Execute(w, data)
 }
 
 // HandleLoginPost mottar e-post, sjekker "konge"-rolle, sender magic-token.

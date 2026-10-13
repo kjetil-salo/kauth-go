@@ -5,7 +5,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/zral/kauth-go/internal/db/gen"
 	"github.com/zral/kauth-go/internal/service"
 	"github.com/zral/kauth-go/internal/token"
 )
@@ -14,7 +16,17 @@ import (
 type DispatchHandler struct {
 	Registry     *service.Registry
 	Issuer       *token.Issuer
+	Queries      *gen.Queries
 	DefaultSvcID string // ID til default-tjeneste for cookie-navn
+}
+
+// nullableStr returnerer nil for tom streng, ellers en peker til strengen —
+// for felter som er NULL-bare i databasen (sqlc emit_pointers_for_null_types).
+func nullableStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // readRedirectCookie leser og URL-dekoder redirect_uri-cookien.
@@ -74,6 +86,63 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		HttpOnly: true,
 		Secure:   os.Getenv("KAUTH_INSECURE_COOKIES") != "true",
 		SameSite: http.SameSiteLaxMode,
+	}
+
+	// Nivå 0: standard OIDC authorization_code-flyt. oidc_authz-cookien ble
+	// satt av LoginHandler.ServeLogin når forespørselen inneholdt
+	// response_type=code&client_id=... — men cookien er USIGNERT (samme
+	// tillitsmodell som redirect_uri-cookien), så alt den sier gjennomkjøres
+	// på nytt her, der den faktisk brukes:
+	//
+	//  1. service-ID-en personen faktisk logget inn på (?service=, satt av
+	//     alle fire login-handlerne) må være IDENTISK med oidcReq.ClientID.
+	//     Uten denne sjekken kan en avbrutt OIDC-runde (cookien lever i 10
+	//     min) kapre en helt urelatert påfølgende innlogging: person starter
+	//     OIDC mot klient A, avbryter, logger inn på intern tjeneste B —
+	//     uten sjekken ville /dispatch ha utstedt en A-kode for B sin
+	//     innlogging, og B sine egne require_role/enforce_org-regler (som
+	//     evalueres i login-handleren for B, ikke her) blir aldri vurdert
+	//     for A. Se ServeLogin, som i tillegg rydder cookien proaktivt i
+	//     ikke-OIDC-grenen — dette er andre laget i samme forsvar.
+	//  2. redirect_uri verifiseres mot tjenestens allowlist på nytt, av
+	//     samme grunn — /login sin validering er ikke noe /dispatch kan
+	//     stole på en usignert cookie for å ha faktisk skjedd.
+	if oidcReq, ok := ReadOIDCAuthorizeCookie(r); ok {
+		ClearOIDCAuthorizeCookie(w)
+		svc := h.Registry.Resolve("", oidcReq.ClientID, "")
+		if svc == nil || q.Get("service") != oidcReq.ClientID || !h.Registry.IsAllowedCallback(svc, oidcReq.RedirectURI) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		code, err := GenerateAuthorizationCode()
+		if err != nil {
+			http.Error(w, "intern feil", http.StatusInternalServerError)
+			return
+		}
+		expiresAt := time.Now().UTC().Add(60 * time.Second).Format("2006-01-02T15:04:05Z")
+		err = h.Queries.InsertAuthorizationCode(r.Context(), gen.InsertAuthorizationCodeParams{
+			Code:                code,
+			ServiceID:           oidcReq.ClientID,
+			Email:               claims.Email,
+			RedirectUri:         oidcReq.RedirectURI,
+			Scope:               nullableStr(oidcReq.Scope),
+			Nonce:               nullableStr(oidcReq.Nonce),
+			CodeChallenge:       oidcReq.CodeChallenge,
+			CodeChallengeMethod: oidcReq.CodeChallengeMethod,
+			CreatedAt:           time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+			ExpiresAt:           expiresAt,
+		})
+		if err != nil {
+			http.Error(w, "intern feil", http.StatusInternalServerError)
+			return
+		}
+		target, err := buildRedirectWithCode(oidcReq.RedirectURI, code, oidcReq.State)
+		if err != nil {
+			http.Error(w, "intern feil", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
 	}
 
 	// Nivå 1: eksplisitt redirect_uri fra cookie

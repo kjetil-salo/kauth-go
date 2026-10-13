@@ -17,6 +17,21 @@ type AuditEvent struct {
 	CreatedAt  string  `json:"created_at"`
 }
 
+type AuthorizationCode struct {
+	ID                  int64   `json:"id"`
+	Code                string  `json:"code"`
+	ServiceID           string  `json:"service_id"`
+	Email               string  `json:"email"`
+	RedirectUri         string  `json:"redirect_uri"`
+	Scope               *string `json:"scope"`
+	Nonce               *string `json:"nonce"`
+	CodeChallenge       string  `json:"code_challenge"`
+	CodeChallengeMethod string  `json:"code_challenge_method"`
+	CreatedAt           string  `json:"created_at"`
+	ExpiresAt           string  `json:"expires_at"`
+	Used                int64   `json:"used"`
+}
+
 type MagicToken struct {
 	ID          int64   `json:"id"`
 	Token       string  `json:"token"`

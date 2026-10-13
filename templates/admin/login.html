@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin – Klarsyn</title>
+    <title>kauth Admin</title>
     <style>
         *, *::before, *::after { box-sizing: border-box; }
         body {
@@ -53,8 +53,8 @@
 <body>
 <div class="card">
     <div class="logo">
-        <h1>Klarsyn Admin</h1>
-        <p id="subtitle">Innsikt som skaper forsprang</p>
+        <h1>kauth Admin</h1>
+        <p id="subtitle">Logg inn for å administrere denne kauth-instansen</p>
     </div>
     {{if .Message}}
     <div class="msg {{if .IsError}}err{{else}}ok{{end}}">{{.Message}}</div>
@@ -84,7 +84,7 @@
             <input type="email" id="email-input" name="email" required autocomplete="email">
             <button type="submit">Send innloggingslenke</button>
         </form>
-        <a href="#" class="back" onclick="document.getElementById('email-view').style.display='none';document.getElementById('buttons-view').style.display='block';document.getElementById('subtitle').textContent='Innsikt som skaper forsprang';return false;">Tilbake til innlogging</a>
+        <a href="#" class="back" onclick="document.getElementById('email-view').style.display='none';document.getElementById('buttons-view').style.display='block';document.getElementById('subtitle').textContent='Logg inn for å administrere denne kauth-instansen';return false;">Tilbake til innlogging</a>
     </div>
     {{end}}
 </div>
