@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -279,4 +280,135 @@ func TestRotate_UnknownToken_IsErrTokenRevoked(t *testing.T) {
 	if _, err := svc.Rotate(context.Background(), "aldri-utstedt", "ip", "ua"); !errors.Is(err, token.ErrTokenRevoked) {
 		t.Fatalf("forventet ErrTokenRevoked, fikk %v", err)
 	}
+}
+
+// memDBWithAudit gir en :memory:-DB med ekte audit-service, slik at testene kan
+// lese audit_events.
+func memDBWithAudit(t *testing.T) (*sql.DB, *token.RefreshService) {
+	t.Helper()
+	sqlDB, q, err := db.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	seedService(t, q)
+	return sqlDB, token.NewRefreshService(sqlDB, audit.NewService(q))
+}
+
+func auditRows(t *testing.T, sqlDB *sql.DB, typ string) (n int, svc, details string) {
+	t.Helper()
+	// Audit er asynkron: vent til raden dukker opp.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var s, d sql.NullString
+		err := sqlDB.QueryRow(`SELECT service_id, details FROM audit_events WHERE event_type=? LIMIT 1`, typ).Scan(&s, &d)
+		if err == nil {
+			_ = sqlDB.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_type=?`, typ).Scan(&n)
+			return n, s.String, d.String
+		}
+		if time.Now().After(deadline) {
+			return 0, "", ""
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func countRevoked(t *testing.T, sqlDB *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM refresh_tokens WHERE revoked=1`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestRotate_RevokedPresented_RevokesFamilyAndAudits(t *testing.T) {
+	sqlDB, svc := memDBWithAudit(t)
+	ctx := context.Background()
+	a, _ := svc.Issue(ctx, testUser(), testService(), "ip", "ua")
+	res, err := svc.Rotate(ctx, a, "ip", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulerer logout-revokering av A alene; B (barnet) lever fortsatt.
+	if _, err := sqlDB.Exec(`UPDATE refresh_tokens SET revoked=1, revoked_reason='user_logout', used=0 WHERE token_hash=?`, token.HashForTest(a)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Rotate(ctx, a, "ip", "ua"); !errors.Is(err, token.ErrTokenRevoked) {
+		t.Fatalf("forventet ErrTokenRevoked, fikk %v", err)
+	}
+	b := rowByPlain(t, sqlDB, res.NewToken)
+	if b.Revoked != 1 || b.RevokedReason == nil || *b.RevokedReason != "revoked_token_presented" {
+		t.Fatalf("barnet skulle vært revokert med revoked_token_presented: %+v", b)
+	}
+	if got := rowByPlain(t, sqlDB, a); got.RevokedReason == nil || *got.RevokedReason != "user_logout" {
+		t.Fatalf("presentert token skulle beholde user_logout: %+v", got.RevokedReason)
+	}
+	n, svcID, _ := auditRows(t, sqlDB, "refresh_token_revoked_presented")
+	if n != 1 || svcID != "testsvc" {
+		t.Fatalf("forventet 1 audit med service_id=testsvc, fikk n=%d svc=%q", n, svcID)
+	}
+}
+
+func TestRotate_ExpiredNotRevoked_NoFamilyRevoke(t *testing.T) {
+	sqlDB, svc := memDBWithAudit(t)
+	ctx := context.Background()
+	a, _ := svc.Issue(ctx, testUser(), testService(), "ip", "ua")
+	res, err := svc.Rotate(ctx, a, "ip", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// B utløper, men er ikke revokert; A er brukt og revokert ikke.
+	if _, err := sqlDB.Exec(`UPDATE refresh_tokens SET expires_at='2000-01-01T00:00:00Z' WHERE token_hash=?`, token.HashForTest(res.NewToken)); err != nil {
+		t.Fatal(err)
+	}
+	before := countRevoked(t, sqlDB)
+	if _, err := svc.Rotate(ctx, res.NewToken, "ip", "ua"); !errors.Is(err, token.ErrTokenRevoked) {
+		t.Fatalf("forventet ErrTokenRevoked, fikk %v", err)
+	}
+	if after := countRevoked(t, sqlDB); after != before {
+		t.Fatalf("familien skulle være urørt: revoked før=%d etter=%d", before, after)
+	}
+	time.Sleep(100 * time.Millisecond) // audit er asynkron
+	var n int
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_type='refresh_token_revoked_presented'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("forventet ingen revoked_presented-audit, fikk %d (err %v)", n, err)
+	}
+}
+
+func TestRotate_ReuseAudit_HasServiceAndGap(t *testing.T) {
+	gapRe := regexp.MustCompile(`^gap_s=\d+$`)
+
+	t.Run("med barn", func(t *testing.T) {
+		sqlDB, svc := memDBWithAudit(t)
+		ctx := context.Background()
+		a, _ := svc.Issue(ctx, testUser(), testService(), "ip", "ua")
+		if _, err := svc.Rotate(ctx, a, "ip", "ua"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.Rotate(ctx, a, "ip", "ua"); !errors.Is(err, token.ErrTokenReuse) {
+			t.Fatalf("forventet ErrTokenReuse, fikk %v", err)
+		}
+		n, svcID, details := auditRows(t, sqlDB, "refresh_token_reuse")
+		if n != 1 || svcID != "testsvc" || !gapRe.MatchString(details) {
+			t.Fatalf("n=%d svc=%q details=%q", n, svcID, details)
+		}
+	})
+
+	t.Run("uten barn", func(t *testing.T) {
+		sqlDB, svc := memDBWithAudit(t)
+		ctx := context.Background()
+		a, _ := svc.Issue(ctx, testUser(), testService(), "ip", "ua")
+		// Brukt uten barn (f.eks. barnet er slettet av opprydding).
+		if _, err := sqlDB.Exec(`UPDATE refresh_tokens SET used=1 WHERE token_hash=?`, token.HashForTest(a)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.Rotate(ctx, a, "ip", "ua"); !errors.Is(err, token.ErrTokenReuse) {
+			t.Fatalf("forventet ErrTokenReuse, fikk %v", err)
+		}
+		_, svcID, details := auditRows(t, sqlDB, "refresh_token_reuse")
+		if svcID != "testsvc" || details != "gap_s=unknown" {
+			t.Fatalf("svc=%q details=%q", svcID, details)
+		}
+	})
 }

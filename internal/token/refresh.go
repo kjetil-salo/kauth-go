@@ -28,6 +28,7 @@ type RefreshQuerier interface {
 	ConsumeRefreshToken(ctx context.Context, arg gen.ConsumeRefreshTokenParams) (gen.RefreshToken, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (gen.RefreshToken, error)
 	RevokeFamilyTokens(ctx context.Context, params gen.RevokeFamilyTokensParams) error
+	GetRefreshChild(ctx context.Context, arg gen.GetRefreshChildParams) (string, error)
 }
 
 // TxRunner kjører fn i én transaksjon. fn får en querier bundet til
@@ -240,9 +241,34 @@ func (s *RefreshService) classifyRejected(ctx context.Context, hash, ip, ua stri
 		slog.Error("refresh: oppslag etter avvist token feilet", "err", err)
 		return fmt.Errorf("slå opp avvist refresh-token: %w", err)
 	}
-	if existing.Used == 0 {
-		return ErrTokenRevoked
+	svcID := ""
+	if existing.ServiceID != nil {
+		svcID = *existing.ServiceID
 	}
+	if existing.Used == 1 {
+		return s.handleReuse(ctx, existing, svcID, ip, ua)
+	}
+	if existing.Revoked == 1 {
+		// Et revokert token som dukker opp igjen er en klient (eller angriper) med
+		// et token fra en avsluttet sesjon. Resten av familien kan fortsatt leve,
+		// så den tas ned. Utløpt-men-ikke-revokert er vanlig klokkeslitasje og
+		// skal ikke koste brukeren de andre enhetene sine.
+		reason := "revoked_token_presented"
+		if err := s.db.RevokeFamilyTokens(ctx, gen.RevokeFamilyTokensParams{
+			RevokedReason: &reason,
+			FamilyID:      existing.FamilyID,
+		}); err != nil {
+			slog.Error("kunne ikke revokere refresh-familie ved revokert token", "family_id", existing.FamilyID, "err", err)
+		}
+		s.audit.Log(ctx, audit.Event{
+			Type: "refresh_token_revoked_presented", Email: existing.Email,
+			ServiceID: svcID, IP: ip, UA: ua, Success: false,
+		})
+	}
+	return ErrTokenRevoked
+}
+
+func (s *RefreshService) handleReuse(ctx context.Context, existing gen.RefreshToken, svcID, ip, ua string) error {
 	reason := "reuse_detected"
 	if err := s.db.RevokeFamilyTokens(ctx, gen.RevokeFamilyTokensParams{
 		RevokedReason: &reason,
@@ -250,11 +276,42 @@ func (s *RefreshService) classifyRejected(ctx context.Context, hash, ip, ua stri
 	}); err != nil {
 		slog.Error("kunne ikke revokere refresh-familie ved gjenbruk", "family_id", existing.FamilyID, "err", err)
 	}
+	// Gapet mellom rotasjonen og gjenbruket skiller en klient-race (sekunder)
+	// fra et stjålet token (timer/dager).
 	s.audit.Log(ctx, audit.Event{
-		Type: "refresh_token_reuse", Email: existing.Email,
-		IP: ip, UA: ua, Success: false,
+		Type: "refresh_token_reuse", Email: existing.Email, ServiceID: svcID,
+		IP: ip, UA: ua, Success: false, Details: s.reuseGap(ctx, existing),
 	})
 	return ErrTokenReuse
+}
+
+// reuseGap gir «gap_s=<n>» fra barnets opprettelse til nå, eller «gap_s=unknown»
+// når barnet mangler eller tiden ikke lar seg tolke. Aldri feil: dette er bare
+// diagnostikk og skal ikke hindre reuse-svaret.
+func (s *RefreshService) reuseGap(ctx context.Context, existing gen.RefreshToken) string {
+	parentID := existing.ID
+	created, err := s.db.GetRefreshChild(ctx, gen.GetRefreshChildParams{FamilyID: existing.FamilyID, ParentID: &parentID})
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Error("refresh: oppslag av barn for reuse-gap feilet", "family_id", existing.FamilyID, "err", err)
+		}
+		return "gap_s=unknown"
+	}
+	return gapLabel(created, time.Now())
+}
+
+// gapLabel er ren for å kunne testes uten klokke. Framtidig created_at (klokkeskjev)
+// gir 0 og ugyldig tid «unknown», så detaljfeltet alltid matcher mønsteret.
+func gapLabel(created string, now time.Time) string {
+	t, err := time.Parse(time.RFC3339, created)
+	if err != nil {
+		return "gap_s=unknown"
+	}
+	gap := int64(now.Sub(t).Seconds())
+	if gap < 0 {
+		gap = 0
+	}
+	return fmt.Sprintf("gap_s=%d", gap)
 }
 
 // RevokeFamily tilbakekaller hele familien (også brukte rader, som beholder
