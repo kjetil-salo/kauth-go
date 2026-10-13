@@ -51,6 +51,12 @@ func NewRefreshServiceWithRunner(q RefreshQuerier, run TxRunner, aud *audit.Serv
 	return &RefreshService{db: q, run: run, audit: aud}
 }
 
+// NewRefreshServiceWithCodeRunner lar tester injisere en egen transaksjonsløper
+// for kodeinnløsning. Kun ment for testoppsett.
+func NewRefreshServiceWithCodeRunner(q RefreshQuerier, run CodeTxRunner, aud *audit.Service) *RefreshService {
+	return &RefreshService{db: q, run: StubTxRunner(q), runCode: run, audit: aud}
+}
+
 // StubTxRunner kjører fn direkte mot q uten transaksjon (for stub-querier).
 func StubTxRunner(q RefreshQuerier) TxRunner {
 	return func(_ context.Context, fn func(RefreshQuerier) error) error { return fn(q) }

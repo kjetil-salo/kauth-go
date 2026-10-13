@@ -34,48 +34,74 @@ type RefreshQuerier interface {
 // transaksjonen; feil fra fn gir rollback, nil gir commit.
 type TxRunner func(ctx context.Context, fn func(q RefreshQuerier) error) error
 
+// CodeQuerier er det innløsning av autorisasjonskode trenger inne i
+// transaksjonen: konsumet og den første refresh-raden. Ingen bruker-spørringer
+// her; de skjer før transaksjonen (PD2).
+type CodeQuerier interface {
+	ConsumeAuthorizationCodeChecked(ctx context.Context, arg gen.ConsumeAuthorizationCodeCheckedParams) (gen.AuthorizationCode, error)
+	InsertRefreshToken(ctx context.Context, params gen.InsertRefreshTokenParams) error
+}
+
+// CodeTxRunner kjører fn i én transaksjon for kodeinnløsning, samme kontrakt som TxRunner.
+type CodeTxRunner func(ctx context.Context, fn func(q CodeQuerier) error) error
+
 // SQLTxRunner lager produksjonsløperen. Standard (deferred) BEGIN beholdes med
 // vilje: rotasjonen starter med en UPDATE, så skrivelåsen tas ved første
 // setning og busy_timeout gjelder. Det er ingen les-så-skriv i transaksjonen,
 // så SQLITE_BUSY_SNAPSHOT kan ikke oppstå.
 func SQLTxRunner(sqlDB *sql.DB) TxRunner {
-	return func(ctx context.Context, fn func(q RefreshQuerier) error) (err error) {
-		tx, err := sqlDB.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("start transaksjon: %w", err)
-		}
-		// Panikk i fn må ikke etterlate en åpen transaksjon som holder skrivelåsen.
-		defer func() {
-			if p := recover(); p != nil {
-				// Rollback-feil kan ikke rapporteres videre; panikken er viktigere.
-				_ = tx.Rollback()
-				panic(p)
-			}
-		}()
-		if err := fn(gen.New(sqlDB).WithTx(tx)); err != nil {
-			// Returnerer fn sin feil, ikke rollback-feilen: den er årsaken kalleren trenger.
-			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				slog.Error("rollback av refresh-transaksjon feilet", "err", rbErr)
-			}
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit transaksjon: %w", err)
-		}
-		return nil
+	return func(ctx context.Context, fn func(q RefreshQuerier) error) error {
+		return inTx(ctx, sqlDB, func(q *gen.Queries) error { return fn(q) })
 	}
 }
 
+// SQLCodeTxRunner er produksjonsløperen for kodeinnløsning. Samme begrunnelse
+// for deferred BEGIN: transaksjonen starter med en UPDATE.
+func SQLCodeTxRunner(sqlDB *sql.DB) CodeTxRunner {
+	return func(ctx context.Context, fn func(q CodeQuerier) error) error {
+		return inTx(ctx, sqlDB, func(q *gen.Queries) error { return fn(q) })
+	}
+}
+
+func inTx(ctx context.Context, sqlDB *sql.DB, fn func(q *gen.Queries) error) (err error) {
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("start transaksjon: %w", err)
+	}
+	// Panikk i fn må ikke etterlate en åpen transaksjon som holder skrivelåsen.
+	defer func() {
+		if p := recover(); p != nil {
+			// Rollback-feil kan ikke rapporteres videre; panikken er viktigere.
+			_ = tx.Rollback()
+			panic(p)
+		}
+	}()
+	if err := fn(gen.New(sqlDB).WithTx(tx)); err != nil {
+		// Returnerer fn sin feil, ikke rollback-feilen: den er årsaken kalleren trenger.
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			slog.Error("rollback av transaksjon feilet", "err", rbErr)
+		}
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaksjon: %w", err)
+	}
+	return nil
+}
+
 type RefreshService struct {
-	db    RefreshQuerier
-	run   TxRunner
-	audit *audit.Service
+	db  RefreshQuerier
+	run TxRunner
+	// runCode er separat fra run fordi kodeinnløsningen trenger en annen
+	// querier (konsum av kode) enn rotasjonen.
+	runCode CodeTxRunner
+	audit   *audit.Service
 }
 
 // NewRefreshService bygger både querier og transaksjonsløper fra samme
 // *sql.DB, slik at produksjon ikke kan glemme transaksjonen.
 func NewRefreshService(sqlDB *sql.DB, audit *audit.Service) *RefreshService {
-	return &RefreshService{db: gen.New(sqlDB), run: SQLTxRunner(sqlDB), audit: audit}
+	return &RefreshService{db: gen.New(sqlDB), run: SQLTxRunner(sqlDB), runCode: SQLCodeTxRunner(sqlDB), audit: audit}
 }
 
 func generatePlainToken() (string, error) {
@@ -110,22 +136,20 @@ func computeExpiresAt(now time.Time, familyExpStr *string) (time.Time, error) {
 	return std, nil
 }
 
-func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Service, ip, ua string) (string, error) {
+// newRootToken lager klartekst og insert-parametre for første rad i en familie.
+// Delt av Issue og RedeemAuthorizationCode slik at familiens utløp og
+// felt ikke kan divergere mellom de to veiene.
+func newRootToken(user gen.User, svc gen.Service, familyID string, now time.Time) (string, gen.InsertRefreshTokenParams, error) {
 	plain, err := generatePlainToken()
 	if err != nil {
-		return "", err
+		return "", gen.InsertRefreshTokenParams{}, err
 	}
-	familyID, err := generateFamilyID()
-	if err != nil {
-		return "", err
-	}
-	now := time.Now().UTC()
 
 	var familyExpStr *string
 	if svc.RefreshTokenMaxAge != nil && *svc.RefreshTokenMaxAge != "" {
 		d, err := ParseISO8601Duration(*svc.RefreshTokenMaxAge)
 		if err != nil {
-			return "", fmt.Errorf("tolke RefreshTokenMaxAge: %w", err)
+			return "", gen.InsertRefreshTokenParams{}, fmt.Errorf("tolke RefreshTokenMaxAge: %w", err)
 		}
 		t := now.Add(d).Format(time.RFC3339)
 		familyExpStr = &t
@@ -133,11 +157,11 @@ func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Servi
 
 	exp, err := computeExpiresAt(now, familyExpStr)
 	if err != nil {
-		return "", err
+		return "", gen.InsertRefreshTokenParams{}, err
 	}
 
 	svcID := svc.ID
-	if err := s.db.InsertRefreshToken(ctx, gen.InsertRefreshTokenParams{
+	return plain, gen.InsertRefreshTokenParams{
 		TokenHash:       HashOpaque(plain),
 		Email:           user.Email,
 		ServiceID:       &svcID,
@@ -148,9 +172,74 @@ func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Servi
 		FamilyExpiresAt: familyExpStr,
 		IpAddress:       nil,
 		UserAgent:       nil,
-	}); err != nil {
+	}, nil
+}
+
+func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Service, ip, ua string) (string, error) {
+	familyID, err := generateFamilyID()
+	if err != nil {
+		return "", err
+	}
+	plain, params, err := newRootToken(user, svc, familyID, time.Now().UTC())
+	if err != nil {
+		return "", err
+	}
+	if err := s.db.InsertRefreshToken(ctx, params); err != nil {
 		return "", fmt.Errorf("lagre refresh-token: %w", err)
 	}
+	s.audit.Log(ctx, audit.Event{Type: "refresh_token_issued", Email: user.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: true})
+	return plain, nil
+}
+
+// CodeRedemption er det kallerens klassifisering har slått fast om koden.
+// CodeChallenge er S256(code_verifier), ikke verdien fra raden: predikatet i
+// UPDATE-en er den siste vakten mot en kode som ikke tilhører verifieren.
+type CodeRedemption struct {
+	CodeHash      string
+	ServiceID     string
+	RedirectURI   string
+	CodeChallenge string
+}
+
+// RedeemAuthorizationCode konsumerer koden og setter inn første refresh-rad i
+// én transaksjon. Feiler innsettingen, står koden ubrukt (used=0), så en
+// intern feil ikke koster klienten koden. sql.ErrNoRows betyr at ingen rad
+// oppfylte predikatene (tapt kappløp, gjenbruk eller utløp); kalleren klassifiserer.
+func (s *RefreshService) RedeemAuthorizationCode(ctx context.Context, p CodeRedemption, user gen.User, svc gen.Service, ip, ua string) (string, error) {
+	// Familie-ID før transaksjonen: den skrives både på koden og på refresh-raden,
+	// og er det som lar gjenbruk av koden revokere akkurat denne familien.
+	familyID, err := generateFamilyID()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC()
+	plain, params, err := newRootToken(user, svc, familyID, now)
+	if err != nil {
+		return "", err
+	}
+	err = s.runCode(ctx, func(q CodeQuerier) error {
+		if _, err := q.ConsumeAuthorizationCodeChecked(ctx, gen.ConsumeAuthorizationCodeCheckedParams{
+			FamilyID:      &familyID,
+			CodeHash:      p.CodeHash,
+			ServiceID:     p.ServiceID,
+			RedirectUri:   p.RedirectURI,
+			CodeChallenge: p.CodeChallenge,
+			Now:           now.Format("2006-01-02T15:04:05Z"),
+		}); err != nil {
+			return err
+		}
+		if err := q.InsertRefreshToken(ctx, params); err != nil {
+			return fmt.Errorf("lagre refresh-token: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		return "", fmt.Errorf("løse inn autorisasjonskode: %w", err)
+	}
+	// Audit etter COMMIT, som i Rotate.
 	s.audit.Log(ctx, audit.Event{Type: "refresh_token_issued", Email: user.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: true})
 	return plain, nil
 }
@@ -309,14 +398,18 @@ func gapLabel(created string, now time.Time) string {
 }
 
 // RevokeFamily tilbakekaller hele familien (også brukte rader, som beholder
-// første revoked_reason), inkludert barnet en rotasjon nettopp har laget. Feil logges bare: kalleren avviser uansett.
-func (s *RefreshService) RevokeFamily(ctx context.Context, familyID, reason string) {
+// første revoked_reason), inkludert barnet en rotasjon nettopp har laget.
+// Feilen logges og returneres; de fleste kallere avviser uansett og kan ignorere den,
+// men gjenbruk av autorisasjonskode skal kunne auditere at revokeringen uteble.
+func (s *RefreshService) RevokeFamily(ctx context.Context, familyID, reason string) error {
 	if err := s.db.RevokeFamilyTokens(ctx, gen.RevokeFamilyTokensParams{
 		RevokedReason: &reason,
 		FamilyID:      familyID,
 	}); err != nil {
 		slog.Error("kunne ikke revokere refresh-familie", "family_id", familyID, "reason", reason, "err", err)
+		return fmt.Errorf("revokere refresh-familie: %w", err)
 	}
+	return nil
 }
 
 // RevokeFamilyOfToken revokerer familien til et presentert refresh-token (logout).

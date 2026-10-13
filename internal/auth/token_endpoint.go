@@ -49,22 +49,21 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		return
 	}
 
-	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	row, err := h.queries.ConsumeAuthorizationCode(r.Context(), gen.ConsumeAuthorizationCodeParams{
-		Code:      token.HashOpaque(code),
-		ExpiresAt: now,
-	})
+	codeHash := token.HashOpaque(code)
+	row, err := h.queries.GetAuthorizationCodeByHash(r.Context(), codeHash)
 	if err != nil {
-		h.aud.Log(r.Context(), audit.Event{Type: "authorization_code_invalid", ServiceID: clientID, IP: ip, UA: ua, Success: false})
-		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+		if errors.Is(err, sql.ErrNoRows) {
+			h.aud.Log(r.Context(), audit.Event{Type: "authorization_code_invalid", ServiceID: sanitizeLogValue(clientID), IP: ip, UA: ua, Success: false})
+			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+			return
+		}
+		slog.Error("authorization_code: oppslag feilet", "err", err)
+		writeTokenError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-
-	// client_id og redirect_uri må matche eksakt det koden ble utstedt for
-	// (RFC 6749 §4.1.3) — hindrer at en kode utstedt til én klient/redirect_uri
-	// løses inn et annet sted.
-	if row.ServiceID != clientID || row.RedirectUri != redirectURI {
-		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+	// Klassifisering FØR konsum: en feil klient, redirect_uri eller verifier
+	// skal ikke brenne en kode som den rette klienten fortsatt kan løse inn (K21).
+	if h.rejectCode(w, r, row, clientID, redirectURI, verifier, ip, ua) {
 		return
 	}
 
@@ -74,16 +73,13 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		return
 	}
 
-	// PKCE er obligatorisk for enhver kode utstedt via denne flyten — ingen
-	// per-tjeneste unntak (se migrasjon 007: code_challenge er NOT NULL).
-	if !VerifyPKCE(verifier, row.CodeChallenge, row.CodeChallengeMethod) {
-		h.aud.Log(r.Context(), audit.Event{Type: "pkce_verification_failed", Email: row.Email, ServiceID: svc.ID, IP: ip, UA: ua, Success: false})
-		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
-		return
-	}
-
 	user, err := h.queries.GetActiveUserByEmail(r.Context(), row.Email)
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Error("authorization_code: brukeroppslag feilet", "err", err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error")
+			return
+		}
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
@@ -115,14 +111,59 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		scope = *row.Scope
 	}
 
+	// Tokens som kan feile signeres før koden konsumeres, slik at en intern
+	// feil ikke brenner koden.
 	at, err := h.issuer.IssueAccessForAudience(user, *svc, clientID)
 	if err != nil {
-		http.Error(w, "intern feil", http.StatusInternalServerError)
+		slog.Error("authorization_code: utstedelse av access-token feilet", "err", err)
+		writeTokenError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	rt, err := h.refresh.Issue(r.Context(), user, *svc, ip, ua)
+	// id_token er en OIDC-ting (OIDC Core §3.1.3.3): utstedes kun når
+	// openid-scopet faktisk ble bedt om. En ren OAuth2-klient som aldri ba
+	// om openid skal ikke få et identitetstoken den ikke forventer.
+	idToken := ""
+	if scopeContains(scope, "openid") {
+		idToken, err = h.issuer.IssueIDToken(user, *svc, nonce)
+		if err != nil {
+			slog.Error("authorization_code: utstedelse av id_token feilet", "err", err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error")
+			return
+		}
+	}
+
+	rt, err := h.refresh.RedeemAuthorizationCode(r.Context(), token.CodeRedemption{
+		CodeHash:      codeHash,
+		ServiceID:     clientID,
+		RedirectURI:   redirectURI,
+		CodeChallenge: S256Challenge(verifier),
+	}, user, *svc, ip, ua)
 	if err != nil {
-		http.Error(w, "intern feil", http.StatusInternalServerError)
+		if !errors.Is(err, sql.ErrNoRows) {
+			slog.Error("authorization_code: innløsning feilet", "err", err)
+			writeTokenError(w, http.StatusInternalServerError, "server_error")
+			return
+		}
+		// SQLITE_BUSY hos taperen gir 500 uten reuse-klassifisering: akseptert,
+		// K23 krever høyst én vinner, ikke at hver taper blir klassifisert.
+		// Tapt kappløp: en annen forespørsel konsumerte koden mellom lesingen og
+		// UPDATE-en. Les på nytt, så taperen behandles som gjenbruk og vinnerens
+		// familie revokeres (K23).
+		fresh, rerr := h.queries.GetAuthorizationCodeByHash(r.Context(), codeHash)
+		if rerr != nil {
+			if errors.Is(rerr, sql.ErrNoRows) {
+				h.aud.Log(r.Context(), audit.Event{Type: "authorization_code_invalid", ServiceID: row.ServiceID, IP: ip, UA: ua, Success: false})
+				writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+				return
+			}
+			slog.Error("authorization_code: omlesing feilet", "err", rerr)
+			writeTokenError(w, http.StatusInternalServerError, "server_error")
+			return
+		}
+		if !h.rejectCode(w, r, fresh, clientID, redirectURI, verifier, ip, ua) {
+			h.aud.Log(r.Context(), audit.Event{Type: "authorization_code_invalid", ServiceID: row.ServiceID, IP: ip, UA: ua, Success: false})
+			writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+		}
 		return
 	}
 
@@ -138,19 +179,53 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		"token_type":    "Bearer",
 		"expires_in":    int64(ttl.Seconds()),
 	}
-	// id_token er en OIDC-ting (OIDC Core §3.1.3.3): utstedes kun når
-	// openid-scopet faktisk ble bedt om. En ren OAuth2-klient som aldri ba
-	// om openid skal ikke få et identitetstoken den ikke forventer.
-	if scopeContains(scope, "openid") {
-		idToken, err := h.issuer.IssueIDToken(user, *svc, nonce)
-		if err != nil {
-			http.Error(w, "intern feil", http.StatusInternalServerError)
-			return
-		}
+	if idToken != "" {
 		resp["id_token"] = idToken
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// rejectCode skriver 400 invalid_grant og returnerer true når koden ikke kan
+// løses inn. Raden røres bare ved gjenbruk (revokering av familien); mismatch
+// og utløp lar den stå, så den rette klienten kan løse den inn.
+func (h *PasswordHandlers) rejectCode(w http.ResponseWriter, r *http.Request, row gen.AuthorizationCode, clientID, redirectURI, verifier, ip, ua string) bool {
+	event := func(typ, details string) {
+		h.aud.Log(r.Context(), audit.Event{Type: typ, Email: row.Email, ServiceID: row.ServiceID, Details: details, IP: ip, UA: ua, Success: false})
+	}
+	switch {
+	case row.Used == 1:
+		// Revoker bare når kalleren beviser at den kjenner koden hele veien
+		// (client, redirect_uri og verifier). Ellers kunne alle med en lekket
+		// kode logge ut brukeren uten verifier.
+		if row.ServiceID != clientID || row.RedirectUri != redirectURI || !VerifyPKCE(verifier, row.CodeChallenge, row.CodeChallengeMethod) {
+			event("authorization_code_reuse", "reason=unverified")
+			break
+		}
+		details := ""
+		// WithoutCancel: revokeringen skal fullføres selv om klienten kobler fra,
+		// ellers overlever angriperens (eller vinnerens) familie.
+		if row.FamilyID != nil {
+			if err := h.refresh.RevokeFamily(context.WithoutCancel(r.Context()), *row.FamilyID, "authorization_code_reuse"); err != nil {
+				details = "revoke_failed"
+			}
+		}
+		event("authorization_code_reuse", details)
+	case row.ExpiresAt <= time.Now().UTC().Format("2006-01-02T15:04:05Z"):
+		event("authorization_code_invalid", "")
+	case row.ServiceID != clientID:
+		event("authorization_code_mismatch", "reason=client")
+	case row.RedirectUri != redirectURI:
+		event("authorization_code_mismatch", "reason=redirect_uri")
+	// PKCE er obligatorisk for enhver kode utstedt via denne flyten, uten
+	// per-tjeneste unntak (migrasjon 007: code_challenge er NOT NULL).
+	case !VerifyPKCE(verifier, row.CodeChallenge, row.CodeChallengeMethod):
+		event("authorization_code_mismatch", "reason=pkce")
+	default:
+		return false
+	}
+	writeTokenError(w, http.StatusBadRequest, "invalid_grant")
+	return true
 }
 
 // scopeContains sjekker om et mellomromseparert scope-felt inneholder en

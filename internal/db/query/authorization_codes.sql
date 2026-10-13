@@ -2,12 +2,6 @@
 INSERT INTO authorization_codes (code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
--- name: ConsumeAuthorizationCode :one
-UPDATE authorization_codes
-SET used = 1
-WHERE code = ? AND used = 0 AND expires_at > ?
-RETURNING *;
-
 -- name: ConsumeAuthorizationCodeChecked :one
 UPDATE authorization_codes
 SET used = 1, family_id = sqlc.arg(family_id)

@@ -9,39 +9,6 @@ import (
 	"context"
 )
 
-const consumeAuthorizationCode = `-- name: ConsumeAuthorizationCode :one
-UPDATE authorization_codes
-SET used = 1
-WHERE code = ? AND used = 0 AND expires_at > ?
-RETURNING id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, family_id
-`
-
-type ConsumeAuthorizationCodeParams struct {
-	Code      string `json:"code"`
-	ExpiresAt string `json:"expires_at"`
-}
-
-func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAuthorizationCodeParams) (AuthorizationCode, error) {
-	row := q.db.QueryRowContext(ctx, consumeAuthorizationCode, arg.Code, arg.ExpiresAt)
-	var i AuthorizationCode
-	err := row.Scan(
-		&i.ID,
-		&i.Code,
-		&i.ServiceID,
-		&i.Email,
-		&i.RedirectUri,
-		&i.Scope,
-		&i.Nonce,
-		&i.CodeChallenge,
-		&i.CodeChallengeMethod,
-		&i.CreatedAt,
-		&i.ExpiresAt,
-		&i.Used,
-		&i.FamilyID,
-	)
-	return i, err
-}
-
 const consumeAuthorizationCodeChecked = `-- name: ConsumeAuthorizationCodeChecked :one
 UPDATE authorization_codes
 SET used = 1, family_id = ?1
