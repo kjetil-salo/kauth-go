@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="nb">
+<head>
+<meta charset="utf-8">
+<title>Veivakt OIDC PoC — kauth-drivstoff</title>
+<style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; color: #0f172a; }
+    h1 { font-size: 1.3rem; }
+    button { font-size: 1rem; padding: .6rem 1.2rem; cursor: pointer; }
+    pre { background: #f1f5f9; padding: 1rem; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    .ok { color: #15803d; font-weight: 600; }
+    .err { color: #dc2626; font-weight: 600; }
+    .claim-ok { background: #dcfce7; }
+    .claim-bad { background: #fee2e2; }
+    table { border-collapse: collapse; margin-top: .5rem; }
+    td { padding: .2rem .6rem; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<h1>Veivakt → drivstoffprisene — OIDC-login PoC</h1>
+<p>Simulerer nøyaktig det Veivakt sin bil-widget gjør: en offentlig
+   (ingen client_secret) OIDC authorization_code+PKCE-klient mot
+   <code>auth.drivstoffprisene.no</code>, med <code>client_id=veivakt</code>.
+   Denne siden <strong>må</strong> kjøre på <code>http://localhost:5173/</code>
+   — det er den eksakte, allerede registrerte <code>redirect_uri</code> for
+   veivakt-tjenesten.</p>
+
+<p><strong>Viktig ved gjenbruk:</strong> hele runden er bundet til denne
+   ene nettleserøkten (verifier+state i <code>sessionStorage</code>, PKCE-
+   forespørselen i en <code>oidc_authz</code>-cookie satt av kauth). Åpne
+   IKKE magic-link-eposten i en annen nettleser/fane og forvent at den
+   fullfører her — den må åpnes i akkurat denne fanen. Å kjøre to runder
+   samtidig (f.eks. denne siden i to vinduer) bruker opp samme e-posts
+   rate-limit (3 lenker / 15 min) og gir forvirrende "utløpt/brukt"-feil.
+   Trykk "Kjør på nytt" og start fra bunnen ved tvil.</p>
+
+<p><strong>Etter 009:</strong> magic-link-lenken logger deg ikke inn ved å bli
+   åpnet. Du får en bekreftelsesside, og det er knappen der som konsumerer
+   lenken (POST fra samme origin) — slik at e-postskannere og
+   lenkeforhåndsvisninger ikke brenner tokenet. Klikk knappen i samme fane,
+   så fortsetter runden hit som før.</p>
+
+<div id="app"></div>
+
+<script>
+const BASE_URL = "https://auth.drivstoffprisene.no";
+const CLIENT_ID = "veivakt";
+const REDIRECT_URI = "http://localhost:5173/";
+// Ressursindikatoren (RFC 8707) er drivstoffprisene selv — den ender opp som
+// aud i access-tokenet, altså det ressursserveren sammenligner mot sin egen
+// identitet før den godtar et delegert skriv.
+const RESOURCE = "https://drivstoffprisene.no";
+const SCOPE_IDENTITET = "openid email";
+const SCOPE_DELEGERT = "openid email priser:skriv";
+
+function b64url(buf) {
+    return btoa(String.fromCharCode(...new Uint8Array(buf)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sha256(str) {
+    return await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+}
+
+function decodeJwtPart(jwt, index) {
+    const part = jwt.split('.')[index];
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/'));
+    return JSON.parse(decodeURIComponent(escape(json)));
+}
+
+function decodeJwt(jwt) { return decodeJwtPart(jwt, 1); }
+function decodeJwtHeader(jwt) { return decodeJwtPart(jwt, 0); }
+
+// Forventningene er ulike for de to tokenene, og det er hele poenget med
+// etappe 2: id_tokenet tilhører klienten (aud=client_id, OIDC Core §2),
+// access-tokenet tilhører ressursserveren (aud=resource, RFC 8707) og bærer
+// scope + typ=at+jwt (RFC 9068).
+function renderClaims(title, jwt, erIdToken, baOmRessurs) {
+    const claims = decodeJwt(jwt);
+    const header = decodeJwtHeader(jwt);
+    const forventetAud = erIdToken ? CLIENT_ID : (baOmRessurs ? RESOURCE : CLIENT_ID);
+    const rows = Object.entries(claims).map(([k, v]) => {
+        let cls = '';
+        if (k === 'aud') cls = JSON.stringify(v).includes(forventetAud) ? 'claim-ok' : 'claim-bad';
+        if (k === 'token_use') cls = v === (erIdToken ? 'id' : 'access') ? 'claim-ok' : 'claim-bad';
+        if (k === 'scope') cls = erIdToken ? 'claim-bad' : 'claim-ok';
+        if (k === 'sub') cls = String(v).includes('@') ? 'claim-bad' : 'claim-ok';
+        return `<tr class="${cls}"><td>${k}</td><td>${JSON.stringify(v)}</td></tr>`;
+    }).join('');
+    const typCls = erIdToken
+        ? (header.typ === 'at+jwt' ? 'claim-bad' : 'claim-ok')
+        : (header.typ === 'at+jwt' ? 'claim-ok' : 'claim-bad');
+    const headerRow = `<tr class="${typCls}"><td>header.typ</td><td>${JSON.stringify(header.typ || null)}</td></tr>`;
+    return `<h3>${title}</h3><table>${headerRow}${rows}</table>`;
+}
+
+async function startLogin(baOmRessurs) {
+    const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+    const verifier = b64url(verifierBytes);
+    const challenge = b64url(await sha256(verifier));
+    const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+
+    sessionStorage.setItem('poc_verifier', verifier);
+    sessionStorage.setItem('poc_state', state);
+    sessionStorage.setItem('poc_resource', baOmRessurs ? RESOURCE : '');
+
+    const url = new URL(BASE_URL + '/login');
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('client_id', CLIENT_ID);
+    url.searchParams.set('redirect_uri', REDIRECT_URI);
+    url.searchParams.set('state', state);
+    url.searchParams.set('code_challenge', challenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+    url.searchParams.set('scope', baOmRessurs ? SCOPE_DELEGERT : SCOPE_IDENTITET);
+    if (baOmRessurs) {
+        url.searchParams.set('resource', RESOURCE);
+    }
+    location.href = url.toString();
+}
+
+async function finishLogin(code, state) {
+    const app = document.getElementById('app');
+    const expectedState = sessionStorage.getItem('poc_state');
+    const verifier = sessionStorage.getItem('poc_verifier');
+
+    if (state !== expectedState) {
+        app.innerHTML = '<p class="err">state matcher ikke — avbryter (mulig CSRF eller gjenbrukt lenke).</p>';
+        return;
+    }
+    app.innerHTML = '<p>Fikk <code>?code=</code> tilbake fra kauth, state matcher. Bytter koden inn mot /token …</p>';
+
+    const resource = sessionStorage.getItem('poc_resource') || '';
+    const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        code, redirect_uri: REDIRECT_URI, client_id: CLIENT_ID, code_verifier: verifier,
+    });
+    // Tas med når runden ba om en ressurs: /token sjekker da at den er
+    // identisk med kodens egen (RFC 8707 §2.2) og svarer invalid_target ellers.
+    if (resource) {
+        body.set('resource', resource);
+    }
+
+    let resp, data;
+    try {
+        resp = await fetch(BASE_URL + '/token', { method: 'POST', body });
+        data = await resp.json();
+    } catch (e) {
+        app.innerHTML = `<p class="err">Fetch til /token feilet (sjekk CORS/nettverk): ${e}</p>`;
+        return;
+    }
+
+    if (!resp.ok) {
+        app.innerHTML = `<p class="err">/token svarte ${resp.status}:</p><pre>${JSON.stringify(data, null, 2)}</pre>`;
+        return;
+    }
+
+    sessionStorage.removeItem('poc_verifier');
+    sessionStorage.removeItem('poc_state');
+    sessionStorage.removeItem('poc_resource');
+
+    const baOmRessurs = !!resource;
+    const scopeLinje = data.scope
+        ? `<p>/token svarte med <code>scope: ${data.scope}</code></p>`
+        : '<p>/token svarte uten scope-felt</p>';
+
+    app.innerHTML = `
+        <p class="ok">Innlogging fullført — ekte ?code=&state= → ekte id_token.</p>
+        ${scopeLinje}
+        ${renderClaims('id_token', data.id_token, true, baOmRessurs)}
+        ${renderClaims('access_token', data.access_token, false, baOmRessurs)}
+        <p><button onclick="history.replaceState({}, '', '${REDIRECT_URI}'); location.reload()">Kjør på nytt</button></p>
+    `;
+}
+
+(function init() {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code');
+    const state = params.get('state');
+    const error = params.get('error');
+    const app = document.getElementById('app');
+
+    if (error) {
+        app.innerHTML = `<p class="err">kauth svarte med feil: ${error}</p>
+            <button onclick="startLogin(false)">Prøv igjen</button>`;
+    } else if (code) {
+        finishLogin(code, state);
+    } else {
+        app.innerHTML = `
+            <p><button onclick="startLogin(false)">Logg inn med drivstoffprisene (som Veivakt)</button></p>
+            <p><button onclick="startLogin(true)">Logg inn og be om delegert skrivetilgang
+               (<code>priser:skriv</code> mot <code>${RESOURCE}</code>)</button></p>`;
+    }
+})();
+</script>
+</body>
+</html>
