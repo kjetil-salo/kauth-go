@@ -37,7 +37,13 @@ Bruker `/common/oauth2/v2.0`-endepunktet for å akseptere både personlige Micro
 
 ### Magic-link på e-post
 
-256-bit kryptografisk tilfeldig token i en lenke, 15 minutters levetid, engangsbruk via atomisk `UPDATE WHERE used = 0`. Anti-enumeration: alle POST-responser ser like ut (status 200, samme melding "sjekk e-post", minimum 200 ms responstid). Rate-limit: 3 forsøk per e-postadresse per 15 minutters glidende vindu.
+256-bit kryptografisk tilfeldig token i en lenke, 15 minutters levetid, engangsbruk via atomisk `UPDATE WHERE used = 0`. Tokenet lagres som SHA-256-hex (`HashOpaque`), aldri i klartekst. Klartekst finnes bare i e-posten.
+
+- **Bestilling (`POST /magic-login`):** e-posten normaliseres (`NormalizeEmail`: trim + små bokstaver) før alt annet. Kvoten er 3 bestillinger per normalisert e-post og formål (`service`/`admin`) per 15 minutter. Den telles i databasen i samme `INSERT`, så den overlever restart og holder under parallelle forespørsler. Er kvoten brukt opp eller lagringen feiler, sendes ingen e-post. Svaret er likevel det samme (se Anti-enumeration). Sending skjer asynkront, slik at responstiden ikke skiller kjente fra ukjente adresser
+- **Tjenestebinding:** raden lagrer tjenesten som ble resolvet ved bestilling, ikke skjemaverdien. Er `auth_magic_link` av for tjenesten, settes ingen rad inn. Ved innløsning brukes bare den lagrede tjenesten, uansett `?service=` eller host. Er tjenesten inaktiv eller har magic link av da, gir det `error=expired`, og tokenet brennes
+- **Bekreftelsesside:** lenken i e-posten åpner `GET /magic-login/{token}`, som bare viser en side med én knapp. Siden har tjenestens tema, nb/en/de, ingen e-postadresse og ingen JavaScript. GET endrer ingenting og teller ikke i kvoten, så lenkeskannere og forhåndsvisning i e-postklienter bruker ikke opp tokenet. Knappen sender `POST /magic-login/{token}`, som bruker opp tokenet og logger inn. Ukjent, utløpt eller brukt token gir `error=expired`
+- **Samme origin:** POST krever samme origin (se Sec-Fetch under Sikkerhetsmekanismer). Et kryss-origin-forsøk gir `403` med en forklaring («åpne lenken i nettleseren»), og tokenet står urørt
+- **Formål:** `magic_tokens.purpose` skiller tjenestelenker (`service`, med `service_id`) fra admin-lenker (`admin`, uten `service_id`). Et token kan ikke brukes på feil side
 
 ### Passord
 
@@ -80,7 +86,8 @@ Familien er enheten for tilbaketrekking (ADN 10). Hele familien revokeres (`Revo
 
 - **Reuse:** et konsumert token presenteres igjen. Sjekken er uavhengig av `used`-flagget og av klientens request-context, slik at revokeringen fullføres selv om klienten kobler fra. Audit `refresh_token_reuse` får `service_id` og `gap_s=<sekunder>` fra barnets opprettelse til gjenbruket (`gap_s=unknown` hvis barnet mangler). Lite gap tyder på klient-race, stort gap på stjålet token. Gapet er grunnlaget hvis et idempotensvindu noen gang skal vurderes
 - **Revokert token presenteres:** familien tas ned på nytt (revoked_reason `revoked_token_presented`) og audit `refresh_token_revoked_presented` logges. Utløpt-men-ikke-revokert token gir bare avvisning
-- **Logout:** `GET /logout` revokerer familien til `refresh_token`-cookien (`user_logout`) før cookien slettes
+- **Logout:** `GET /logout` revokerer familien til `refresh_token`-cookien (`user_logout`) før cookien slettes, men bare når forespørselen er en bevisst handling (se Logout og Sec-Fetch under Sikkerhetsmekanismer)
+- **Verifisert gjenbruk av autorisasjonskode:** familien koden ga opphav til revokeres (`authorization_code_reuse`) bare når klient, `redirect_uri` og PKCE matcher, se OIDC-delen
 - **Deaktivering:** admin-deaktivering av en bruker revokerer alle brukerens refresh-tokens (`user_deactivated`)
 
 Klienten får generisk avvisning, og hele kjeden er død for både angriper og legitim klient. Et ekte refresh-race logger derfor ut begge parter. Matcher OAuth Security BCP (RFC 9700 §4.14.2).
@@ -135,7 +142,7 @@ gjenværende `oidc_authz`-cookie fra en tidligere avbrutt OIDC-runde — se
 
 ### Autorisasjonskoder
 
-`authorization_codes`-tabellen speiler `magic_tokens`: kortlevd (60 sekunder
+`authorization_codes`-tabellen speiler `magic_tokens` (koden lagres som SHA-256-hex, klartekst går bare i redirecten): kortlevd (60 sekunder
 — vesentlig kortere enn magic-link sine 15 minutter, siden koden kun skal
 leve fra `/dispatch`-redirect til klientens umiddelbare innløsning) og
 engangsbrukt (`used`-flagg, samme "konsumer atomisk"-mønster som
@@ -190,24 +197,29 @@ forespørsel som refresh). For `authorization_code`:
 
 1. `code_verifier` sin lengde valideres (43-128 tegn, RFC 7636 §4.1) før den
    i det hele tatt brukes til noe
-2. Koden konsumeres atomisk (`ConsumeAuthorizationCode`) — ugyldig, brukt
-   eller utløpt kode gir generisk `invalid_grant`
-3. `client_id` og `redirect_uri` fra requesten må matche eksakt det koden
-   ble utstedt for (RFC 6749 §4.1.3) — hindrer at en kode avlyttet på ett
-   sted løses inn med en annen redirect_uri
-4. `code_verifier` hashes (SHA-256 → base64url) og sammenlignes mot lagret
-   `code_challenge` — kun `S256` støttes, `plain` tilbys bevisst ikke (ingen
-   reell beskyttelse). Alltid håndhevet, ikke betinget av noe tjenesteflagg
+2. Koden slås opp på hash. Manglende `code` gir `invalid_request`, ukjent tjeneste `invalid_client`, ukjent kode generisk `invalid_grant` (audit `authorization_code_invalid`)
+3. En kode som allerede er brukt, er gjenbruk (sjekkes før utløp og mismatch). Matcher klient, `redirect_uri` og
+   PKCE, revokeres refresh-familien koden ga opphav til (`authorization_code_reuse`,
+   OAuth BCP). Matcher de ikke, revokeres ingenting (`authorization_code_reuse` med `reason=unverified`),
+   så en lekket kode alene ikke kan logge ut brukeren. Utløpt kode gir `authorization_code_invalid`
+4. `client_id` og `redirect_uri` fra requesten må matche eksakt det koden
+   ble utstedt for (RFC 6749 §4.1.3), og `code_verifier` hashes
+   (SHA-256 → base64url) og sammenlignes mot lagret `code_challenge`. Kun
+   `S256` støttes, `plain` tilbys bevisst ikke. Alltid håndhevet, ikke
+   betinget av noe tjenesteflagg. Avvik gir `invalid_grant` og audit
+   `authorization_code_mismatch` med `reason=client|redirect_uri|pkce`, og
+   koden røres ikke: en angriper som bare gjetter, kan ikke brenne offerets kode
 5. `checkPolicy(user, svc)` — samme funksjon Google-flyten bruker — kjøres
    på nytt mot tjenesten koden faktisk tilhører (`row.ServiceID`, ikke noen
    URL-parameter). Dette er den reelle beskyttelsen mot tilgangsomgåelse,
    se forklaringen over
-6. Ved suksess utstedes access- og refresh-token, med access-tokenet utstedt
+6. Konsum og første refresh-rad skjer i én transaksjon (`ConsumeAuthorizationCodeChecked`, med alle predikater i `WHERE`). Koden får `family_id` fra den nye familien. Ved parallelle forsøk vinner høyst ett, og taperen klassifiseres som gjenbruk. Øvrige kodefeil gir `400 invalid_grant`, interne feil `500 server_error`
+7. Ved suksess utstedes access- og refresh-token, med access-tokenet utstedt
    via `Issuer.IssueAccessForAudience` — `aud`=client_id, i motsetning til
    det vanlige access-tokenet fra `IssueAccess` (utstedt til tjenester vi
    selv kontrollerer, uten `aud`). Riktig for et token som nå kan havne hos
    en ressursserver på en ekstern parts side
-7. `id_token` (`Issuer.IssueIDToken`, `aud`=client_id, `nonce` speilet fra
+8. `id_token` (`Issuer.IssueIDToken`, `aud`=client_id, `nonce` speilet fra
    requesten) utstedes KUN hvis scope inneholder `openid` (OIDC Core
    §3.1.3.3) — en ren OAuth2-klient som aldri ba om `openid` skal ikke få et
    identitetstoken den ikke forventer
@@ -272,15 +284,18 @@ var reelt håndhevet for Google/Microsoft-innlogging.
 
 ## Admin-panel
 
-Beskyttede ruter under `/admin/*` med separat `admin_token`-cookie (egen JWT med `token_use=admin`). Krever rollen `konge` i `users.roles`.
+Beskyttede ruter under `/admin/*` med separat `admin_token`-cookie (egen JWT med `token_use=admin`). Krever rollen `konge` i `users.roles`. Middlewaren verifiserer JWT-en og slår deretter opp brukeren i databasen på hver request. Ukjent eller deaktivert bruker, manglende `konge` i DB-rollene og DB-feil gir avvisning (`303 /admin/login` eller `401`), aldri tilgang. En deaktivert admin mister dermed tilgangen umiddelbart, ikke først når JWT-en utløper. Alle ikke-sikre metoder under `/admin` krever samme origin.
+
+Skrivehandlingene (`user_created`, `user_edited`, `user_deactivated`, `service_created`, `service_edited`) auditeres synkront etter at endringen er lagret, med `actor=<admin-e-post>` i `details`. Feiler audit-skrivingen, står endringen, og redirecten får `?warn=audit` slik at listen viser «Lagret, men ikke auditert». Skjemafelt leses bare fra POST-body (`PostFormValue`), aldri fra query.
 
 ### Innlogging
 
 - `GET /admin/login` — viking-door bakgrunn, primær Google-knapp + sekundær e-postlenke
 - `GET /admin/google-init` — starter vanlig Google-flyt mot samme `/callback` (samme URL som er hvitlistet hos Google), men med admin-formål i den HMAC-signerte state-parameteren. Formålet hentes aldri fra query, cookie eller `redirect_uri`, og flyten går ikke innom `/dispatch`
 - `GET /admin/google-callback` — utgått inngang som ikke setter cookie og bare redirecter til `/admin/login`. Admin-sesjonen settes i OIDC-callbacken (`/callback`) når signert state har admin-formål: aktiv bruker, eksakt rolle `konge` og e-post bekreftet av Google
-- `POST /admin/login` — magic-link-flyt for admin (anti-enumeration, 200ms floor)
-- `GET /admin/verify?token=<X>` — konsumerer magic-token, sjekker konge-rolle
+- `POST /admin/login` — magic-link-flyt for admin (samme origin kreves, anti-enumeration, 200ms floor, samme kvote som tjenestene: 3 per 15 min, formål `admin`)
+- `GET /admin/verify?token=<X>` — viser bekreftelsesside (norsk, ingen e-post, ingen JavaScript). Endrer ikke tokenet
+- `POST /admin/verify` — samme origin kreves. Konsumerer magic-token, sjekker konge-rolle og setter `admin_token`
 
 ### Brukeradministrasjon
 
@@ -326,15 +341,42 @@ Alle cookies har `HttpOnly: true` og `Secure: true` i prod (over Cloudflare HTTP
 
 ### Anti-enumeration
 
-`POST /magic-login` og `POST /admin/login` returnerer alltid samme respons uavhengig av om e-postadressen finnes — samme melding, samme status (200), og minst 200 ms responstid (defer-sleep om saksflyten gikk for raskt).
+`POST /magic-login` og `POST /admin/login` returnerer alltid samme respons uavhengig av om e-postadressen finnes, om kvoten er brukt opp, om tjenesten har magic link av og om lagringen feilet — samme melding, samme status (200), og minst 200 ms responstid (defer-sleep om saksflyten gikk for raskt). E-post sendes asynkront, så sendetiden ikke avslører noe.
 
 ### Rate-limiting
 
-Magic-link: 3 forsøk per e-post per 15-minutters glidende vindu. Lagret in-memory per kauth-prosess.
+Magic-link: 3 bestillinger per normalisert e-post og formål per 15-minutters vindu, telt i databasen (`magic_tokens`) og derfor uavhengig av restart. Det finnes ingen limit per IP ennå (BACKLOG).
+
+### Samme origin (Sec-Fetch)
+
+`internal/fetchmeta` avgjør om en skrivende request kommer fra kauth selv. `Sec-Fetch-Site: same-origin` godtas. Mangler headeren, må `Origin` være lik egen origin (`https://` + `Host`, `http://` bare med `KAUTH_INSECURE_COOKIES=true`). `same-site`, `cross-site`, `none`, `Origin: null` og fravær av begge gir avvisning (fail-closed). Brukes på `POST /magic-login/{token}`, `POST /admin/verify` og som middleware på alle ikke-sikre metoder under `/admin`. Avvisning gir `403`, ingen databaseskriving og ingen audit. Loggen har rutemønster og header-verdier, aldri token.
+
+### Logout og Sec-Fetch
+
+`/logout` er fortsatt GET, fordi klientapper navigerer dit fra egen vert. Revokering og sletting av cookies skjer bare etter denne tabellen:
+
+| `Sec-Fetch-Site` | `Sec-Fetch-Mode` / `-Dest` | Utfall |
+|---|---|---|
+| mangler (eldre klient, curl) | – | Revokerer |
+| `same-origin`, `same-site`, `none` | uansett | Revokerer |
+| `cross-site` | `navigate` og `Dest` er `document` eller mangler | Revokerer |
+| `cross-site` | alt annet (`img`/`no-cors`, `cors`, `navigate` med `iframe`) | Ingen revokering og ingen endring av cookies. Samme redirect som før |
+
+En skjult `<img>` eller `<iframe>` på en cross-site side kan altså ikke logge brukeren ut stille. Same-site-forespørsler kan fortsatt, og synlig toppnivå-navigasjon fra en annen side revokerer. Restrisiko: `same-site` revokerer, så en kompromittert søster-app kan logge ut stille.
+
+### E-postnormalisering
+
+E-post normaliseres (`NormalizeEmail`: trim + små bokstaver) ved bestilling av magic link og i Google- og Microsoft-flyten, og nye brukere lagres normalisert. Oppslag på brukere sammenligner `lower(trim(email))` på begge sider, og en unik indeks (`idx_users_email_norm`) hindrer duplikater som bare skiller seg i store/små bokstaver. Kolliderer en auto-registrering med en eksisterende (f.eks. deaktivert) bruker, avvises innloggingen med `reason=user_conflict`, uten ny rad.
+
+**Merknad:** Go `ToLower` bretter Unicode, mens SQLite `lower()` bare bretter ASCII. En eldre rad med ikke-ASCII store bokstaver (f.eks. `Ø@x.no`) finnes derfor ikke ved oppslag med `ø@x.no`, og gir en duplikatkonto (ikke kontoovertakelse). Prod har ingen slike rader. Løses med varig identitet (Fase 2).
 
 ### Audit-isolering
 
-Audit-logging skjer i en goroutine separat fra auth-flyten. Hvis databasen er treig eller utilgjengelig, fortsetter auth uten å blokkere. Lar oss aldri miste en innlogging fordi audit-log-en haltet.
+Vanlig audit (`Log`) går via en begrenset kø (1 024 hendelser) med én skriver-goroutine, adskilt fra auth-flyten. Hvis databasen er treig eller utilgjengelig, fortsetter auth uten å blokkere. Er køen full, droppes hendelsen. Det telles, og `audit: hendelse droppet` logges med kumulativ teller høyst hvert 10. sekund. Skriveren bruker egen kontekst med 5 s timeout per innsetting.
+
+Admin-skrivehandlinger bruker `LogSync` (skriver direkte og returnerer feilen). `/token` og refresh bruker aldri `LogSync`.
+
+Ved shutdown venter kauth på pågående e-postsendinger (5 s), tømmer audit-køen (`audit: tømt N hendelser`, 5 s) og lukker så databasen. Hendelser kan fortsatt gå tapt ved full kø, timeout på flush eller hard kill.
 
 ### IP-tracking via Cloudflare
 
@@ -346,7 +388,7 @@ Audit-logging skjer i en goroutine separat fra auth-flyten. Hvis databasen er tr
 
 ### Constant-time admin-rolle-sjekk
 
-Admin-middleware verifiserer JWT, sjekker `token_use == "admin"` og deretter `groups`-claim for `konge` — alle kontroller før requesten slipper inn.
+Admin-middleware verifiserer JWT, sjekker `token_use == "admin"` og `groups`-claim for `konge`, og bekrefter så mot databasen at brukeren er aktiv og har `konge` — alle kontroller før requesten slipper inn.
 
 ## Cross-host login-flyt
 
@@ -394,6 +436,8 @@ Lagret i `audit_events`-tabellen med felter:
 - `details` — fritekst, brukes for grunn på feilet login. `refresh_token_reuse` har `gap_s=<n>`, `user_deactivated` har `id=<n> revoked=<antall>` eller `id=<n> revoke_failed` (deaktiveringen står selv om revokeringen feiler; refresh for deaktivert bruker avvises uansett)
 - `created_at` — ISO 8601 UTC
 
+Nye event-typer fra 009: `authorization_code_invalid`, `authorization_code_mismatch`, `authorization_code_reuse`, `authorization_code_exchanged`. Admin-skriv har `actor=<e-post>` i `details`. Skrivingen er asynkron via kø, bortsett fra admin-skriv (se Audit-isolering).
+
 90 dagers retensjon (cleanup-jobb sletter eldre). Eksporteres via admin GUI som CSV.
 
 ## Bakgrunnsjobber
@@ -422,11 +466,12 @@ Alle stopper rent på `ctx.Done()` ved SIGTERM/SIGINT.
 | GET | `/ms-callback` | Microsoft OAuth callback |
 | GET | `/magic-login` | Magic-link-skjema, valgfri `?service=<id>` og `?lang=<nb\|en\|de>` |
 | POST | `/magic-login` | Send magic-link |
-| GET | `/magic-login/{token}` | Konsumer magic-token |
+| GET | `/magic-login/{token}` | Bekreftelsesside (endrer ingenting) |
+| POST | `/magic-login/{token}` | Konsumer magic-token (samme origin kreves) |
 | POST | `/do-login` | Passord-login (hvis aktivert) |
 | POST | `/token` | `grant_type=refresh_token` eller `grant_type=authorization_code` (+ PKCE) — CORS-aktivert |
 | GET | `/dispatch` | Post-login dispatcher |
-| GET | `/logout` | Revokerer refresh-familien, sletter cookies, redirect |
+| GET | `/logout` | Revokerer refresh-familien, sletter cookies, redirect (se tabellen under Sikkerhetsmekanismer) |
 | GET | `/api/me` | JWT-introspection (returnerer claims som JSON) |
 | GET | `/.well-known/jwks.json` | JWKS — CORS-aktivert |
 | GET | `/.well-known/openid-configuration` | Discovery — CORS-aktivert |
@@ -437,15 +482,16 @@ Alle stopper rent på `ctx.Done()` ved SIGTERM/SIGINT.
 | Metode | Sti | Beskyttelse |
 |---|---|---|
 | GET | `/admin/login` | Åpen |
-| POST | `/admin/login` | Åpen — anti-enumeration |
-| GET | `/admin/verify` | Åpen — krever magic-token |
+| POST | `/admin/login` | Åpen — samme origin, anti-enumeration |
+| GET | `/admin/verify` | Åpen — bekreftelsesside, krever magic-token |
+| POST | `/admin/verify` | Åpen — samme origin, konsumerer magic-token |
 | GET | `/admin/logout` | Åpen |
 | GET | `/admin/google-init` | Åpen — starter Google-flyt med admin-formål i signert state |
 | GET | `/admin/google-callback` | Åpen — utgått, redirecter til `/admin/login` uten å sette cookie |
 | GET | `/admin/users[/new/{id}/edit/export]` | konge-rolle |
-| POST | `/admin/users[/{id}[/deactivate]]` | konge-rolle |
+| POST | `/admin/users[/{id}[/deactivate]]` | konge-rolle, samme origin |
 | GET | `/admin/audit[/export]` | konge-rolle |
-| GET, POST | `/admin/services[/new/{id}/edit]` | konge-rolle |
+| GET, POST | `/admin/services[/new/{id}/edit]` | konge-rolle, POST med samme origin |
 
 ## Datamodell
 
@@ -457,11 +503,11 @@ Tjeneste-konfigurasjon. 30+ kolonner inkludert id, display_name, domain, auth_ho
 
 ### `users`
 
-Brukerkontoer: id, email, password_hash, name, roles (CSV), orgs (CSV), created_at, last_login, deactivated_at.
+Brukerkontoer: id, email (unik på `lower(trim(email))`), password_hash, name, roles (CSV), orgs (CSV), created_at, last_login, deactivated_at.
 
 ### `magic_tokens`
 
-Engangs-innloggingstokens: id, token, email, service_id, redirect_uri, created_at, expires_at, used.
+Engangs-innloggingstokens: id, token (SHA-256-hex), email (normalisert), service_id (NULL for admin), purpose (`service`/`admin`), redirect_uri, created_at, expires_at, used.
 
 ### `refresh_tokens`
 
@@ -473,13 +519,13 @@ Hendelseslogg: id, event_type, auth_method, email, service_id, ip_address, user_
 
 ### `authorization_codes`
 
-Engangs-autorisasjonskoder for OIDC `authorization_code`-flyten: id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used.
+Engangs-autorisasjonskoder for OIDC `authorization_code`-flyten: id, code (SHA-256-hex), family_id (settes ved innløsning), service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used.
 
 ## Drift og kjøremiljø
 
 - **Single static binær** — ingen CGO, ingen runtime-avhengigheter (modernc.org/sqlite)
 - **Cross-compile** — `make build-arm64` for ARM64-linux
-- **Graceful shutdown** — `signal.NotifyContext` + `srv.Shutdown(15s)`, cleanup-goroutiner stopper rent på `ctx.Done()`
+- **Graceful shutdown** — `signal.NotifyContext` + `srv.Shutdown(15s)`, så pågående e-postsendinger (5 s), `auditSvc.Close` (5 s) og til slutt `sqlDB.Close()`. Cleanup-goroutiner stopper rent på `ctx.Done()`
 - **Minne** — `GOMEMLIMIT=96MiB` + cgroup `MemoryHigh=112M` / `MemoryMax=128M` via systemd
 - **Strukturerte logger** — `log/slog`, JSON-format, til journald via systemd
 - **WAL-modus** — SQLite med `journal_mode=WAL` og `foreign_keys=ON` ved oppstart

@@ -97,7 +97,7 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 
 ## ADN 11 — Engangshemmeligheter lagres som hash og brukes opp bare ved en bevisst handling fra samme origin. Admin-tilgang og audit følger DB-en (2026-10-13)
 
-**Status:** Foreslått
+**Status:** Vedtatt (2026-10-14)
 → Analyse: [doc/features/009_AN_HERD_FLYTER_DEL2.md](features/009_AN_HERD_FLYTER_DEL2.md)
 
 **Beslutning:**
@@ -119,3 +119,6 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 - To additive migrasjoner (`purpose` og `family_id`, og unik indeks på `lower(trim(email))`). Tokens og claims er uendret.
 - Access-tokens fra en gjenbrukt kode lever ut TTL til `jti` finnes (H5, 010).
 - Limit per IP på bestilling av magic link står igjen (BACKLOG).
+- Akseptert restrisiko, login-CSRF (P1): bekreftelsessiden viser ikke e-postadressen. Et offer som trykker på en lenke en angriper har bestilt til sin egen adresse, kan dermed logges inn som angriperen (sosial manipulering).
+- Akseptert restrisiko, logout (P2/PB3): `same-site` og bar GET revokerer. En kompromittert søster-app, eller toppnivå-navigasjon fra en annen side, kan logge brukeren ut. Det gir en uønsket utlogging, ingen tilgang.
+- Akseptert restrisiko: 3 bestillinger per 15 min blokkerer offerets magic link (kvote-DoS, som før).

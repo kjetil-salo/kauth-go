@@ -4,7 +4,7 @@
 
 **Hva dette ikke er:** en beslutningslogg. *Hvorfor* noe er bestemt står i [ARCHITECTURE_DESIGN_NOTES.md](ARCHITECTURE_DESIGN_NOTES.md). Faser, risikoregister og estimater står i [ROADMAP.md](ROADMAP.md). Ved motstrid er ADN-en fasit.
 
-Sist gjennomgått: 2026-10-13
+Sist gjennomgått: 2026-10-14
 
 ---
 
@@ -14,7 +14,7 @@ Sist gjennomgått: 2026-10-13
 |---|-----|---------|-----|
 | 1 | **007 Akutt sikkerhetsherding** (Fase 0) | Ett-klikks kjede fra lenke til admin-overtakelse i prod (K1+K2). Tilgangskrav nulles stille ved admin-lagring (H1) | ROADMAP §2.1–2.2 |
 | 2 | Beslutning B1–B6 | Blokkerer analyse for Fase 1–2 | ROADMAP §4 |
-| 3 | 008–010 Herd eksisterende flyter (Fase 1) | nOAuth, `aud`, refresh-transaksjon, magic link | ROADMAP §5 |
+| 3 | 010 Herd eksisterende flyter, del 3 (Fase 1): `aud`/`jti` på alle tokens (H5) | 008 og 009 er levert. Gjenstår: `aud`, `jti` og tilbaketrekking av access-tokens, også fra en gjenbrukt kode | ROADMAP §5 |
 | 4 | 011–012 Stabil identitet (Fase 2) | Må være på plass før flere leverandører kommer til | ADN 7 |
 
 ## Senere
@@ -32,16 +32,22 @@ Sist gjennomgått: 2026-10-13
 | Rotering av per-tjeneste OAuth-credentials | Kan ikke gjøres i admin-UI etter 007 F4 (bevisst). Må gjøres direkte i DB, eller i et eget skjema med secret-felt som bare kan skrives | ROADMAP M12 |
 | Rate limit og dummy-bcrypt på `/do-login`, eller fjern passordkoden helt (B4) | Når `KAUTH_PASSWORD_LOGIN_ENABLED=true` gjelder fortsatt: ingen rate limit og et timing-orakel for brukeroppregning. Bryteren står av i prod (007 F6, security M1) | ROADMAP M10, B4 |
 | Strip standardport og konverter IDN i `KAUTH_CORS_ORIGINS` | `https://a.example:443` og Unicode-verter godtas, men matcher aldri det nettleseren sender (007 F7, code review S-b) | ROADMAP H7 |
-| Begrens audit-rader fra gjentatte `/dispatch`-kall | En autentisert bruker kan generere mange audit-rader via gjentatte `/dispatch`-kall (`redirect_service_mismatch`). Vurder rate limit eller dedup sammen med M9 (007 F9) | ROADMAP M9 |
+| Begrens audit-rader fra gjentatte `/dispatch`-kall | En autentisert bruker kan generere mange audit-rader via gjentatte `/dispatch`-kall (`redirect_service_mismatch`). Vurder rate limit eller dedup (007 F9) | — |
 | Sterkere kilde-autentisering for `CF-Connecting-IP` | Loopback-tillit betyr at lokale prosesser på boksen kan sette klient-IP. Vurder unix-socket eller delt hemmelighet fra cloudflared (007 F10) | — |
 | vinkjeller: del refresh på tvers av faner (Web Locks/single-flight, som klarsyn) | Samtidige refresh fra flere faner gir reuse, og etter 008 logger det ut begge parter (008 F2, ADN 10 pkt 5) | ROADMAP H6 |
 | Overvåk W1-utløseren: reuse med `gap_s ≤ 2`, samme IP og UA | Slår den til, revurder idempotensvindu for samtidig refresh. Ellers ingen tiltak (008, ADN 10 pkt 5) | ROADMAP H6 |
-| Cross-site logout: `<img src=/logout>` revokerer sesjonen stille | `SameSite=None`-cookien sendes med, og `/logout` revokerer nå familien (008 F4). Tiltak i Fase 1 del 2 sammen med M6: hopp over revoke ved `Sec-Fetch-Site=cross-site` og ikke-navigate, eller POST-logout | ROADMAP M6 |
-| Audit-volum fra gjentatte presentasjoner av revokerte tokens | Hver presentasjon logger `refresh_token_revoked_presented`. Vurder rate limit eller dedup sammen med M9 (008 F3) | ROADMAP M9 |
+| Audit-volum fra gjentatte presentasjoner av revokerte tokens | Hver presentasjon logger `refresh_token_revoked_presented`. Vurder rate limit eller dedup (008 F3) | — |
 | Fase 3–6 | Forutsetter Fase 2 | ROADMAP §5 |
 | Apple Sign In | Løpende kostnad. Kommer som adapter etter Fase 4 ved dokumentert behov | ADN 7 |
 | GitHub/LinkedIn m.fl. | Kan i stor grad dekkes av generisk OIDC (Fase 4) | ROADMAP §5 |
-| Normaliser e-post (lowercase/trim) ved oppslag i Google- og MS-flyten | I dag kan case-varianter gi duplikatkontoer (008 F11 S1) | — |
 | Deaktivert bruker på tjeneste med auto-register gir `login_failed` i stedet for `access_denied` | Uventet feilkode, ufarlig (008 F10 S2) | — |
 | Audit for «ingen konto», policybrudd og DB-feil i vanlig gren av Google-flyten | Bare avvisning på `email_verified` auditeres i dag (008 F10 S3) | — |
 | OIDC-klient i authorization_code-flyten mister `oidc_authz` ved ugyldig state og får ingen spec-feil-redirect | Klienten ender på `/login` i stedet for `redirect_uri?error=` (008 F9 S3) | — |
+| Limit per IP på `POST /magic-login` | Også e-postflom via aliaser (`x+1@`) mot én innboks. Kvoten per e-post stopper dem ikke. Krever en IP-modell (ADN 9 pkt 7, 009 F3) | ADN 11 |
+| vinkjeller og univers-authgate kaller ikke kauth `/logout` | Refresh-familien revokeres ikke ved utlogging der. spekto bør bekreftes (009 P-betingelser) | ROADMAP H6 |
+| Audit i samme transaksjon som admin-endringen | I dag logges `LogSync` etter at endringen er lagret. Feiler audit, står endringen og listen viser advarsel. Gjøres ved behov (009 F7) | ADN 11 |
+| PB2 fail-open som beredskap | Magic-bekreftelse og admin-POST avvises når både `Sec-Fetch-Site` og gyldig `Origin` mangler. Viser P7 (iPhone-Mail, Gmail-appen) eller drift problemer, kan sjekken snus til fail-open uten DB-endring (009 PB2) | ADN 11 |
+| SMTP-grenen i `internal/mail` mangler dial-timeout | `smtp.Dial` uten tidsgrense, og sendingen er asynkron. En hengende SMTP-server gir opphopning av goroutiner. Bruk `net.DialTimeout` + deadline, ev. semafor rundt sendingen. Brevo har 10 s (009 F3 S-a) | — |
+| Kvote-DoS på magic link | 3 bestillinger per 15 min blokkerer offerets magic link. Akseptert risiko, som før 009 (009 F3 S3s) | ADN 11 |
+| Unicode-bretting for eldre ikke-ASCII-rader | Go `ToLower` bretter Unicode, SQLite `lower()` bare ASCII. En eldre rad som `Ø@x.no` finnes ikke med `ø@x.no` og gir duplikatkonto. 0 slike rader i prod. Løses med varig identitet i Fase 2 (009 F9 S1) | ROADMAP M11, ADN 7 |
+| Tilbaketrekking av access-tokens fra gjenbrukt autorisasjonskode | Familien revokeres, men access-tokens lever ut TTL til `jti` finnes. Hører til H5 i 010 (009 F8) | ROADMAP H5 |
