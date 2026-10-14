@@ -28,6 +28,9 @@ func TestResolveSocialService(t *testing.T) {
 		{"auth.klarsyn.net", "?service=spekto", "klarsyn"},
 		{"AUTH.SPEKTO.LIVE", "?service=spekto", "spekto"},
 		{"auth.klarsyn.net", "?service=finnes-ikke", "klarsyn"},
+		// Host uten auth_host-match: annen tenant avvises fortsatt (default).
+		{"127.0.0.1:8083", "?service=spekto", "klarsyn"},
+		{"127.0.0.1:8083", "?service=analyse", "analyse"},
 	}
 	for _, c := range cases {
 		r := httptest.NewRequest("GET", "/social-login"+c.query, nil)

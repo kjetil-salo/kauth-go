@@ -91,7 +91,12 @@ func (h *MicrosoftHandlers) HandleCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// Tjenesten kommer fra den signerte staten satt i InitiateLogin, se google.go.
-	svc := h.reg.ResolveOrDefault("", claims.ServiceID, "")
+	svc := h.reg.Resolve("", claims.ServiceID, "")
+	if svc == nil {
+		h.auditRejected(r, &gen.Service{ID: claims.ServiceID}, "", "unknown_service")
+		redirectLoginError(w, r, "", errCodeLoginFailed)
+		return
+	}
 	clientID, clientSecret := msCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,

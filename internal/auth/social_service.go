@@ -25,5 +25,7 @@ func resolveSocialService(reg *service.Registry, r *http.Request) *gen.Service {
 			return svc
 		}
 	}
-	return reg.ResolveOrDefault(r.Host, serviceID, "")
+	// Avvist eller ukjent ?service= skal ikke få en ny sjanse via nivå 3 i
+	// Resolve når hosten ikke matcher noen auth_host.
+	return reg.ResolveOrDefault(r.Host, "", "")
 }

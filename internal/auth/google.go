@@ -135,7 +135,13 @@ func (h *GoogleHandlers) HandleCallback(w http.ResponseWriter, r *http.Request) 
 	// Tjenesten kommer fra den signerte staten satt i InitiateLogin. Host-headeren
 	// skal ikke kunne overstyre den, ellers ender en undertjeneste uten egen
 	// auth_host (delt host) opp som foreldretjenesten.
-	svc := h.reg.ResolveOrDefault("", svcID, "")
+	// En tjeneste som er deaktivert mens staten levde, avvises i stedet for å
+	// falle til default-tjenesten med dens policy og callback.
+	svc := h.reg.Resolve("", svcID, "")
+	if svc == nil {
+		h.rejectCallback(w, r, &gen.Service{ID: svcID}, adminPurpose, "unknown_service")
+		return
+	}
 	clientID, clientSecret := googleCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,
