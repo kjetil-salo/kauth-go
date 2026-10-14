@@ -97,7 +97,7 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 
 ## ADN 11 — Engangshemmeligheter lagres som hash og brukes opp bare ved en bevisst handling fra samme origin. Admin-tilgang og audit følger DB-en (2026-10-13)
 
-**Status:** Vedtatt (2026-10-14)
+**Status:** Implementert (2026-10-14). Vedtatt 2026-10-14, i prod som `009-a` og `009-b`
 → Analyse: [doc/features/009_AN_HERD_FLYTER_DEL2.md](features/009_AN_HERD_FLYTER_DEL2.md)
 
 **Beslutning:**
