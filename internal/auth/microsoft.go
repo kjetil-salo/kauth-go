@@ -43,7 +43,7 @@ func NewMicrosoftHandlers(cfg config.Config, q *gen.Queries, iss *token.Issuer, 
 
 // InitiateLogin — GET /ms-oidc-login
 func (h *MicrosoftHandlers) InitiateLogin(w http.ResponseWriter, r *http.Request) {
-	svc := h.reg.ResolveOrDefault(r.Host, r.URL.Query().Get("service"), "")
+	svc := resolveSocialService(h.reg, r)
 	if svc.AuthMicrosoft != 1 {
 		http.Error(w, "Microsoft-innlogging ikke aktivert", http.StatusForbidden)
 		return
@@ -90,7 +90,13 @@ func (h *MicrosoftHandlers) HandleCallback(w http.ResponseWriter, r *http.Reques
 		redirectLoginError(w, r, "", errCodeLoginFailed)
 		return
 	}
-	svc := h.reg.ResolveOrDefault(r.Host, claims.ServiceID, "")
+	// Tjenesten kommer fra den signerte staten satt i InitiateLogin, se google.go.
+	svc := h.reg.Resolve("", claims.ServiceID, "")
+	if svc == nil {
+		h.auditRejected(r, &gen.Service{ID: claims.ServiceID}, "", "unknown_service")
+		redirectLoginError(w, r, "", errCodeLoginFailed)
+		return
+	}
 	clientID, clientSecret := msCreds(h.cfg, svc)
 	oauthCfg := &oauth2.Config{
 		ClientID:     clientID,

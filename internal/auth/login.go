@@ -81,6 +81,10 @@ func (h *LoginHandler) ServeLogin(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	serviceID := q.Get("service")
 	redirectURI := q.Get("redirect_uri")
+	// Ved en OIDC-forespørsel er tjenesten gitt av client_id. Den skal også styre
+	// siden og knappenes ?service=, ellers vinner host-matchen og en undertjeneste
+	// på delt auth-host rendres som foreldretjenesten (Nivå 0 mismatcher da).
+	var oidcSvc *gen.Service
 
 	if IsOIDCAuthorizeRequest(q) {
 		oidcReq := ParseOIDCAuthorizeRequest(q)
@@ -108,6 +112,7 @@ func (h *LoginHandler) ServeLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		SetOIDCAuthorizeCookie(w, oidcReq)
+		oidcSvc = svc
 		serviceID = svc.ID
 		redirectURI = ""
 	} else {
@@ -119,7 +124,10 @@ func (h *LoginHandler) ServeLogin(w http.ResponseWriter, r *http.Request) {
 		ClearOIDCAuthorizeCookie(w)
 	}
 
-	svc := h.Registry.ResolveOrDefault(r.Host, serviceID, redirectURI)
+	svc := oidcSvc
+	if svc == nil {
+		svc = h.Registry.ResolveOrDefault(r.Host, serviceID, redirectURI)
+	}
 	if svc == nil {
 		http.Error(w, "ukjent tjeneste", http.StatusBadRequest)
 		return

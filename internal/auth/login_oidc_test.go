@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -88,4 +89,27 @@ func TestServeLogin_NonOIDCRequest_ClearsStaleOIDCCookie(t *testing.T) {
 		}
 	}
 	require.True(t, cleared, "stale oidc_authz-cookie skal ryddes i ikke-OIDC-grenen")
+}
+
+// En OIDC-forespørsel for en undertjeneste uten egen auth_host, sendt til
+// foreldretjenestens host: siden og knappene skal følge client_id, ellers
+// får Google/MS-knappene ?service=<forelder> og Nivå 0 i /dispatch mismatcher.
+func TestServeLogin_OIDC_SharedHostRendersClientService(t *testing.T) {
+	host := "auth.klarsyn.net"
+	tmpl := template.Must(template.ParseGlob("../../templates/*.html"))
+	h := &auth.LoginHandler{Templates: tmpl, Registry: service.NewRegistryForTest([]gen.Service{
+		{ID: "klarsyn", DisplayName: "Klarsyn", AuthHost: &host, Domain: "klarsyn.net",
+			CallbackUrl: "https://klarsyn.net/cb", Active: 1, AuthGoogle: 1, AuthMicrosoft: 1, Theme: "light"},
+		{ID: "analyse", DisplayName: "Analyse", Domain: "analyse.klarsyn.net",
+			CallbackUrl: "https://analyse.klarsyn.net/cb", Active: 1, AuthGoogle: 1, AuthMicrosoft: 1, Theme: "light"},
+	})}
+	req := httptest.NewRequest(http.MethodGet, "/login?response_type=code&client_id=analyse&redirect_uri=https://analyse.klarsyn.net/cb&code_challenge=x&code_challenge_method=S256", nil)
+	req.Host = host
+	w := httptest.NewRecorder()
+	h.ServeLogin(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	require.Contains(t, body, `/social-login?service=analyse`)
+	require.Contains(t, body, `/ms-oidc-login?service=analyse`)
 }
