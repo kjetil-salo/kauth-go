@@ -318,3 +318,88 @@ func TestMSFinish_TrimsEmail(t *testing.T) {
 	rr := msFinish(f, svc, cl)
 	assert.Equal(t, http.StatusFound, rr.Code)
 }
+
+func msUserCount(t *testing.T, f *msFixture) int64 {
+	t.Helper()
+	n, err := f.q.CountUsers(context.Background())
+	require.NoError(t, err)
+	return n
+}
+
+func TestMSFinish_MixedCaseEmail_FindsExistingUser(t *testing.T) {
+	for _, tc := range []struct{ stored, idp string }{
+		{"Mixed@Case.no", "mixed@case.no"},
+		{"mixed@case.no", " Mixed@Case.NO"},
+	} {
+		t.Run(tc.stored, func(t *testing.T) {
+			f, svc := newMSFixture(t, 1, nil)
+			existing, err := f.q.CreateUser(context.Background(), gen.CreateUserParams{Email: tc.stored, Roles: "user", CreatedAt: "2026-01-01T00:00:00Z"})
+			require.NoError(t, err)
+			before := msUserCount(t, f)
+
+			cl := msValid(msOrgTid, msBool(true))
+			cl.Email = tc.idp
+			rr := msFinish(f, svc, cl)
+
+			assert.Equal(t, http.StatusFound, rr.Code)
+			assert.True(t, strings.HasPrefix(rr.Header().Get("Location"), "/dispatch?"))
+			assert.Equal(t, before, msUserCount(t, f), "ingen ny rad")
+			u, err := f.q.GetUserByEmail(context.Background(), "mixed@case.no")
+			require.NoError(t, err)
+			assert.Equal(t, existing.ID, u.ID)
+			assert.NotNil(t, u.LastLogin, "innloggingen tilhører den eksisterende raden")
+		})
+	}
+}
+
+func TestMSFinish_NewUserStoredNormalized(t *testing.T) {
+	f, svc := newMSFixture(t, 1, nil)
+	cl := msValid(msOrgTid, msBool(true))
+	cl.Email = "New@Case.no"
+	rr := msFinish(f, svc, cl)
+	assert.Equal(t, http.StatusFound, rr.Code)
+	u, err := f.q.GetUserByEmail(context.Background(), "new@case.no")
+	require.NoError(t, err)
+	assert.Equal(t, "new@case.no", u.Email)
+}
+
+func TestMSFinish_CreateConflict_LoginFailedAudited(t *testing.T) {
+	f, svc := newMSFixture(t, 1, nil)
+	u, err := f.q.CreateUser(context.Background(), gen.CreateUserParams{Email: "x@case.no", Roles: "user", CreatedAt: "2026-01-01T00:00:00Z"})
+	require.NoError(t, err)
+	now := "2026-01-02T00:00:00Z"
+	_, err = f.q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: u.ID})
+	require.NoError(t, err)
+	before := msUserCount(t, f)
+
+	cl := msValid(msOrgTid, msBool(true))
+	cl.Email = "X@Case.no"
+	rr := msFinish(f, svc, cl)
+
+	assert.Equal(t, http.StatusSeeOther, rr.Code)
+	assert.Equal(t, "/login?error=login_failed&service=klarsyn", rr.Header().Get("Location"))
+	assert.Empty(t, rr.Result().Cookies())
+	assert.Equal(t, before, msUserCount(t, f))
+	ev := msAuditEvents(t, f, "microsoft_oidc_rejected", 1)
+	require.NotNil(t, ev[0].Details)
+	assert.Equal(t, "reason=user_conflict", *ev[0].Details)
+}
+
+func TestMSFindOrCreate_OnlyUniqueViolationIsConflict(t *testing.T) {
+	f, svc := newMSFixture(t, 1, nil)
+	u, err := f.q.CreateUser(context.Background(), gen.CreateUserParams{Email: "x@case.no", Roles: "user", CreatedAt: "2026-01-01T00:00:00Z"})
+	require.NoError(t, err)
+	now := "2026-01-02T00:00:00Z"
+	_, err = f.q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: u.ID})
+	require.NoError(t, err)
+
+	_, err = f.h.findOrCreate(context.Background(), "x@case.no", "X", svc)
+	require.ErrorIs(t, err, errUserConflict)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = f.h.findOrCreate(ctx, "ny@case.no", "N", svc)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, errUserConflict)
+	require.NotErrorIs(t, err, errNoAccount)
+}

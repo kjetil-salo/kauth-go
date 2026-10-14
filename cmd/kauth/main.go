@@ -20,6 +20,7 @@ import (
 	"github.com/zral/kauth-go/internal/auth"
 	"github.com/zral/kauth-go/internal/config"
 	"github.com/zral/kauth-go/internal/db"
+	"github.com/zral/kauth-go/internal/fetchmeta"
 	"github.com/zral/kauth-go/internal/jobs"
 	"github.com/zral/kauth-go/internal/mail"
 	"github.com/zral/kauth-go/internal/service"
@@ -45,7 +46,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
-	defer sqlDB.Close()
 
 	// ── 3. Initialiser støttetjenester ──────────────────────────────────────
 	auditSvc := audit.NewService(queries)
@@ -128,7 +128,8 @@ func main() {
 	// ── Magic link ────────────────────────────────────────────────────────────
 	r.Get("/magic-login", magicH.ShowForm)
 	r.Post("/magic-login", magicH.RequestLink)
-	r.Get("/magic-login/{token}", magicH.VerifyToken)
+	r.Get("/magic-login/{token}", magicH.ShowConfirm)
+	r.Post("/magic-login/{token}", magicH.Redeem)
 
 	// ── Token-endepunkt: refresh_token + authorization_code — CORS kun her ───
 	r.With(auth.CORSMiddleware(cfg.CORSOrigins)).Post("/token", passwordH.Token)
@@ -151,17 +152,20 @@ func main() {
 
 	// ── Admin-panel ───────────────────────────────────────────────────────────
 	r.Route("/admin", func(r chi.Router) {
+		// Først, slik at både åpne og beskyttede POST krever samme origin (M6).
+		r.Use(fetchmeta.Middleware)
 		// Åpne admin-ruter (ingen auth-middleware)
 		r.Get("/login", adminAuthH.HandleLoginGet)
 		r.Post("/login", adminAuthH.HandleLoginPost)
 		r.Get("/verify", adminAuthH.HandleVerify)
+		r.Post("/verify", adminAuthH.HandleVerifyPost)
 		r.Get("/logout", adminAuthH.HandleLogout)
 		r.Get("/google-init", googleH.InitiateAdminLogin)
 		r.Get("/google-callback", adminAuthH.HandleGoogleCallback)
 
 		// Beskyttede admin-ruter
 		r.Group(func(r chi.Router) {
-			r.Use(admin.AdminAuthMiddleware(issuer))
+			r.Use(admin.AdminAuthMiddleware(issuer, queries))
 
 			// Root redirect
 			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -209,18 +213,54 @@ func main() {
 		close(errCh)
 	}()
 
+	// Felles avslutning for signal og server-feil: sendinger, så audit, så DB.
+	drain := func() {
+		// Pågående magic-link-sendinger får en frist, ellers tapes de ved SIGTERM.
+		waitSends(5*time.Second, magicH.WaitForSends, adminAuthH.WaitForSends)
+		// Audit tømmes før databasen lukkes, ellers tapes køede hendelser.
+		auditCtx, auditCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer auditCancel()
+		if err := auditSvc.Close(auditCtx); err != nil {
+			log.Printf("audit: Close feilet: %v", err)
+		}
+		if err := sqlDB.Close(); err != nil {
+			log.Printf("database: lukking feilet: %v", err)
+		}
+	}
+
 	select {
 	case <-ctx.Done():
+		// Slipp signalhåndteringen, så et nytt SIGTERM/SIGINT avslutter umiddelbart.
+		stop()
 		log.Println("kauth: mottok avslutningssignal")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("graceful shutdown feilet: %v", err)
 		}
+		drain()
 		log.Println("kauth: avsluttet rent")
 	case err := <-errCh:
 		if err != nil {
-			log.Fatalf("server-feil: %v", err)
+			log.Printf("server-feil: %v", err)
+			drain()
+			os.Exit(1)
 		}
+	}
+}
+
+// waitSends venter på alle sendinger, men gir opp etter fristen.
+func waitSends(timeout time.Duration, waits ...func()) {
+	done := make(chan struct{})
+	go func() {
+		for _, w := range waits {
+			w()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Println("kauth: frist utløpt mens e-postsendinger pågikk")
 	}
 }

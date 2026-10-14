@@ -28,6 +28,7 @@
         .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 99px; font-size: 0.75rem; }
         .badge-green { background: #14532d; color: #86efac; }
         .badge-red   { background: #7f1d1d; color: #fca5a5; }
+        .warn { background: #422006; color: #fcd34d; border: 1px solid #854d0e; padding: 0.6rem 0.9rem; border-radius: 5px; margin-bottom: 1rem; font-size: 0.875rem; }
         .pagination { display: flex; gap: 0.5rem; margin-top: 1rem; align-items: center; font-size: 0.875rem; }
         .pagination a { color: #3b82f6; }
     </style>
@@ -43,6 +44,7 @@
 </nav>
 <main>
     <h1>Brukere</h1>
+    {{if .WarnAudit}}<div class="warn" role="alert">Lagret, men ikke auditert. Sjekk loggen.</div>{{end}}
     <div class="toolbar">
         <form method="GET" action="/admin/users">
             <input type="search" name="search" placeholder="Søk e-post..." value="{{.Search}}">

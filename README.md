@@ -15,7 +15,7 @@ Running in production across a handful of services.
 ## What kauth does
 
 - Issues JWTs (RS256)
-- Rotates refresh tokens atomically with reuse detection (OAuth BCP §4.13): presenting an already-consumed or revoked token revokes the whole family, including the newest token. Logout revokes the family too. Client errors give `401 invalid_or_expired_token` / `refresh_token_reused`; internal errors give `500 server_error`
+- Rotates refresh tokens atomically with reuse detection (OAuth BCP §4.13): presenting an already-consumed or revoked token revokes the whole family, including the newest token. Logout revokes the family too, but not when a hidden `<img>` or `<iframe>` on a cross-site page triggers it. Same-site requests still can. Client errors give `401 invalid_or_expired_token` / `refresh_token_reused`; internal errors give `500 server_error`
 - Exposes JWKS and OpenID Discovery under `/.well-known/`
 - Speaks standard OIDC `authorization_code` + PKCE (RFC 6749 §4.1, RFC 7636, mandatory for every `response_type=code` request — no confidential-client exception) — a real `id_token` with `aud`/`nonce`, so an external client you don't control the code of can plug in an off-the-shelf OIDC library instead of the bespoke token-in-URL flow. See [doc/FEATURES.md](doc/FEATURES.md#oidc-authorization_code--pkce).
 - Offers four sign-in paths per service: Google OIDC, Microsoft OIDC, email magic link, and passwords (the last one off by default — see *The passwordless choice* below)
@@ -229,7 +229,9 @@ export KAUTH_SMTP_FROM=noreply@yourdomain.com
 export KAUTH_SMTP_STARTTLS=true
 ```
 
-Set `auth_magic_link = 1` on the service. The user gets a link that lives for 15 minutes, is single-use, and is consumed atomically in the database. Three attempts per email address per 15 minutes — anything beyond that is quietly dropped (anti-enumeration: every response looks the same).
+Set `auth_magic_link = 1` on the service. The user gets a link that lives for 15 minutes and is single-use. Only a SHA-256 hash of the token is stored. Three requests per email address per 15 minutes (the address is trimmed and lowercased first) — anything beyond that is quietly dropped (anti-enumeration: every response looks the same). The limit is counted in the database, so it survives a restart.
+
+Opening the link only shows a confirmation page with one button. The token is used up when the button is pressed, and the request must come from kauth's own origin. That way mail scanners and link previews can't burn or complete the sign-in. The link is bound to the service it was requested for, and `?service=` in the URL is only a theme hint. The confirmation page answers 403 if the request has neither `Sec-Fetch-Site: same-origin` nor a matching `Origin` header, for example when a mail app opens the link in an embedded view.
 
 ### A sender address per service
 
@@ -265,6 +267,8 @@ There are still edge cases. A one-off user without Google who won't hand over an
 
 Every sign-in, refresh round and admin operation lands in `audit_events`. The panel lives at `/admin/audit`.
 
+Events go through a bounded queue (1,024 entries) with a single writer, so audit never blocks sign-in or `/token`. If the queue is full, the event is dropped and counted in the log. Admin changes are written synchronously with the acting admin's email in the details. On shutdown kauth drains the queue before closing the database.
+
 The filter covers every column in the table. Timestamp takes a from- and to-date. Email, IP and details are substring searches with an operator beside them, so you can just as easily ask for *everything except* a value — handy for weeding out your own activity. Event, method, service and OK are checkboxes, and the choices are read from the data, so new event types appear on their own without a code change. Rows missing a method or service get their own `(none)` box; without it, "check everything" would hide them.
 
 Filters combine freely and are carried in the URL, so a filter can be bookmarked or shared. "Export CSV" takes exactly what you see.
@@ -275,7 +279,7 @@ The cleanup job deletes events older than 90 days.
 
 Deploy: `make deploy` cross-compiles to arm64, scps the binary to the target host and restarts the systemd unit. The target is set through `KAUTH_DEPLOY_HOST`.
 
-`kauth.service` runs as an ordinary user, with WAL-enabled SQLite, graceful SIGTERM, and restart on failure. Memory is handled through GOMEMLIMIT and a cgroup ceiling set in the unit file.
+`kauth.service` runs as an ordinary user, with WAL-enabled SQLite, graceful SIGTERM, and restart on failure. On SIGTERM it finishes in-flight requests, pending mail and the audit queue, in that order. Memory is handled through GOMEMLIMIT and a cgroup ceiling set in the unit file.
 
 Backups live in `scripts/backup-kauth-go.sh` — a daily copy via cron at 03:00, using `sqlite3 .backup`, which is safe while kauth is running. 30-day retention.
 
@@ -288,7 +292,7 @@ Cloudflare Tunnel sits in front: kauth listens on `127.0.0.1` by default (`KAUTH
 - `cmd/kauth` — entry point. Config, database startup, router wiring, graceful shutdown.
 - `internal/auth` — sign-in handlers (Google, Microsoft, magic link, password), dispatch, login page, middleware.
 - `internal/token` — JWT issuance, JWKS, refresh rotation.
-- `internal/admin` — admin panel: user administration, audit log, service config, magic-link and Google sign-in for admins.
+- `internal/admin` — admin panel: user administration, audit log, service config, magic-link and Google sign-in for admins. On the protected routes every request is checked against the database, so a deactivated admin loses access at once. Every write under `/admin` requires a same-origin request.
 - `internal/service` — service resolver with a cache. Decides which service an incoming request belongs to, based on redirect URI or auth host.
 - `internal/i18n` — language catalogue and detection (`nb`/`en`/`de`, falling back to English) for the login pages and the magic-link email.
 - `internal/db` — sqlc-generated database layer over SQLite (modernc.org/sqlite, CGO-free).

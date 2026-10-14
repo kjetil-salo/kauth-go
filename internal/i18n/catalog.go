@@ -22,6 +22,11 @@ var catalog = map[string]Strings{
 		MagicValidMinutes: "The link is valid for 15 minutes.",
 		BackToSignIn:      "Back to sign-in",
 
+		MagicConfirmTitle:   "Confirm sign-in",
+		MagicConfirmButton:  "Sign in",
+		MagicConfirmHint:    "Tap Sign in to finish. The link only works once.",
+		MagicConfirmBlocked: "Sign-in couldn't be completed here. Copy the link from the email and paste it into your browser.",
+
 		ErrAccessDenied:    "Access denied.",
 		ErrLoginFailed:     "Sign-in failed. Please try again.",
 		ErrInvalidRedirect: "Invalid return address. Please start the sign-in again.",
@@ -53,6 +58,11 @@ var catalog = map[string]Strings{
 		MagicValidMinutes: "Lenken er gyldig i 15 minutter.",
 		BackToSignIn:      "Tilbake til innlogging",
 
+		MagicConfirmTitle:   "Bekreft innlogging",
+		MagicConfirmButton:  "Logg inn",
+		MagicConfirmHint:    "Trykk «Logg inn» for å fullføre. Lenken virker bare én gang.",
+		MagicConfirmBlocked: "Innloggingen kunne ikke fullføres her. Kopier lenken fra e-posten og lim den inn i nettleseren.",
+
 		ErrAccessDenied:    "Tilgang nektet.",
 		ErrLoginFailed:     "Innloggingen feilet. Prøv igjen.",
 		ErrInvalidRedirect: "Ugyldig retur-adresse. Start innloggingen på nytt.",
@@ -83,6 +93,11 @@ var catalog = map[string]Strings{
 		MagicSentToAfter:  " gesendet. Klicken Sie auf den Link, um sich anzumelden.",
 		MagicValidMinutes: "Der Link ist 15 Minuten gültig.",
 		BackToSignIn:      "Zurück zur Anmeldung",
+
+		MagicConfirmTitle:   "Anmeldung bestätigen",
+		MagicConfirmButton:  "Anmelden",
+		MagicConfirmHint:    "Klicken Sie auf „Anmelden“, um fortzufahren. Der Link ist nur einmal gültig.",
+		MagicConfirmBlocked: "Die Anmeldung konnte hier nicht abgeschlossen werden. Kopieren Sie den Link aus der E-Mail und öffnen Sie ihn im Browser.",
 
 		ErrAccessDenied:    "Zugriff verweigert.",
 		ErrLoginFailed:     "Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut.",

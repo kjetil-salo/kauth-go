@@ -17,7 +17,7 @@ func TestAdminMiddleware_NoErrorDetailInResponse(t *testing.T) {
 	_, verr := issuer.Verify(garbage, token.ExpectAdmin)
 	require.Error(t, verr)
 
-	handler := AdminAuthMiddleware(issuer)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	handler := AdminAuthMiddleware(issuer, adminDB(t, "konge@example.com", "konge"))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
 	req.Header.Set("Accept", "application/json")
 	req.AddCookie(&http.Cookie{Name: "admin_token", Value: garbage})

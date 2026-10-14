@@ -5,26 +5,36 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/config"
 	"github.com/zral/kauth-go/internal/db/gen"
+	"github.com/zral/kauth-go/internal/fetchmeta"
 	"github.com/zral/kauth-go/internal/mail"
 	"github.com/zral/kauth-go/internal/token"
 )
 
+// magicMailer lar tester telle sendinger uten SMTP.
+type magicMailer interface {
+	SendMagicLink(to, fromName, linkURL, locale, fromAddress string) error
+}
+
 // AuthHandler håndterer admin-innlogging via magic-token.
 type AuthHandler struct {
-	queries  *gen.Queries
-	issuer   *token.Issuer
-	mailer   *mail.Service
-	auditor  *audit.Service
-	cfg      *config.Config
-	loginTpl *template.Template
+	queries   *gen.Queries
+	issuer    *token.Issuer
+	mailer    magicMailer
+	auditor   *audit.Service
+	cfg       *config.Config
+	loginTpl  *template.Template
+	verifyTpl *template.Template
+	sendWG    sync.WaitGroup // lar tester og shutdown vente på asynkrone sendinger
 }
 
 func NewAuthHandler(
@@ -35,13 +45,15 @@ func NewAuthHandler(
 	cfg *config.Config,
 ) *AuthHandler {
 	tpl := template.Must(template.ParseFiles("templates/admin/login.html"))
+	verifyTpl := template.Must(template.ParseFiles("templates/admin/verify.html"))
 	return &AuthHandler{
-		queries:  queries,
-		issuer:   issuer,
-		mailer:   mailer,
-		auditor:  auditor,
-		cfg:      cfg,
-		loginTpl: tpl,
+		queries:   queries,
+		issuer:    issuer,
+		mailer:    mailer,
+		auditor:   auditor,
+		cfg:       cfg,
+		loginTpl:  tpl,
+		verifyTpl: verifyTpl,
 	}
 }
 
@@ -103,7 +115,10 @@ func (h *AuthHandler) HandleLoginPost(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 	ctx := r.Context()
-	email := strings.TrimSpace(strings.ToLower(r.FormValue("email")))
+	email := token.NormalizeEmail(r.PostFormValue("email"))
+	if !token.ValidEmail(email) {
+		return nil
+	}
 
 	user, err := h.queries.GetActiveUserByEmail(ctx, email)
 	if err != nil {
@@ -137,16 +152,34 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 
 	now := time.Now().UTC()
 	expiresAt := now.Add(15 * time.Minute)
-	err = h.queries.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-		Token:       rawToken,
+	if err := token.CheckMagicPurpose(token.MagicPurposeAdmin, nil); err != nil {
+		return err
+	}
+	// Kvoten (3 per 15 min) håndheves atomisk i selve INSERT-en, slik at den
+	// overlever restart og parallelle forespørsler. Ingen rad, ingen e-post.
+	n, err := h.queries.InsertMagicTokenLimited(ctx, gen.InsertMagicTokenLimitedParams{
+		TokenHash:   token.HashOpaque(rawToken),
 		Email:       email,
 		ServiceID:   nil,
 		RedirectUri: nil,
+		Purpose:     token.MagicPurposeAdmin,
 		CreatedAt:   now.Format("2006-01-02T15:04:05Z"),
 		ExpiresAt:   expiresAt.Format("2006-01-02T15:04:05Z"),
+		WindowStart: now.Add(-15 * time.Minute).Format("2006-01-02T15:04:05Z"),
 	})
 	if err != nil {
 		return err
+	}
+	if n != 1 {
+		h.auditor.Log(ctx, audit.Event{
+			Type:    "admin_magic_link_requested",
+			Email:   email,
+			IP:      extractIP(r),
+			UA:      r.UserAgent(),
+			Success: false,
+			Details: "kvote overskredet",
+		})
+		return nil
 	}
 
 	verifyURL := h.cfg.BaseURL + "/admin/verify?token=" + rawToken
@@ -154,9 +187,15 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 	// Admin-panelet er norsk-only, så e-posten sendes eksplisitt på norsk.
 	// Admin-panelet er ikke tjeneste-bundet, så det finnes ingen
 	// email_from_address å bruke — uendret global avsender (rå SMTP).
-	if sendErr := h.mailer.SendMagicLink(email, fromName, verifyURL, "nb", ""); sendErr != nil {
-		return sendErr
-	}
+	// Asynkront av samme grunn som i tjenesteflyten: SMTP-latens bare for
+	// konge-brukere ville avslørt hvem som er admin via responstiden.
+	h.sendWG.Add(1)
+	go func() {
+		defer h.sendWG.Done()
+		if sendErr := h.mailer.SendMagicLink(email, fromName, verifyURL, "nb", ""); sendErr != nil {
+			slog.Error("admin: kunne ikke sende magic-link", "error", sendErr)
+		}
+	}()
 
 	h.auditor.Log(ctx, audit.Event{
 		Type:    "admin_magic_link_requested",
@@ -164,13 +203,57 @@ func (h *AuthHandler) tryIssueMagicLink(r *http.Request) error {
 		IP:      extractIP(r),
 		UA:      r.UserAgent(),
 		Success: true,
+		// Sendingen er asynkron, så success betyr bare at lenken er lagret.
+		// Sendefeil står i journalen (slog.Error over).
+		Details: "lenke lagret",
 	})
 	return nil
 }
 
-// HandleVerify verifiserer magic-token, setter admin_token-cookie og redirecter.
+type verifyPageData struct {
+	Token   string
+	Blocked bool
+}
+
+func (h *AuthHandler) renderVerify(w http.ResponseWriter, status int, data verifyPageData) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// Siden bærer et engangstoken i skjemaet og må aldri ligge i en cache.
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = h.verifyTpl.Execute(w, data)
+}
+
+// HandleVerify — GET /admin/verify?token=. Viser bare en bekreftelsesside og
+// bruker ikke opp tokenet: e-postklienter og lenkeskannere henter lenker med GET
+// og skal ikke kunne bruke dem opp eller logge noen inn.
 func (h *AuthHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 	rawToken := strings.TrimSpace(r.URL.Query().Get("token"))
+	if rawToken == "" {
+		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		return
+	}
+
+	mt, err := h.queries.GetValidMagicTokenByHash(r.Context(), gen.GetValidMagicTokenByHashParams{
+		TokenHash: token.HashOpaque(rawToken),
+		Purpose:   token.MagicPurposeAdmin,
+		Now:       time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
+	if err != nil || mt.ServiceID != nil {
+		http.Redirect(w, r, "/admin/login?err=ugyldig_token", http.StatusSeeOther)
+		return
+	}
+	h.renderVerify(w, http.StatusOK, verifyPageData{Token: rawToken})
+}
+
+// HandleVerifyPost — POST /admin/verify. Bruker opp tokenet, setter
+// admin_token-cookie og redirecter. Krever samme origin, ellers kunne en
+// annen side få nettleseren til å fullføre innloggingen med en lenke angriperen eier.
+func (h *AuthHandler) HandleVerifyPost(w http.ResponseWriter, r *http.Request) {
+	if !fetchmeta.SameOrigin(r) {
+		h.renderVerify(w, http.StatusForbidden, verifyPageData{Blocked: true})
+		return
+	}
+	rawToken := strings.TrimSpace(r.PostFormValue("token"))
 	if rawToken == "" {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
@@ -180,8 +263,9 @@ func (h *AuthHandler) HandleVerify(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
 	mt, err := h.queries.ConsumeMagicToken(ctx, gen.ConsumeMagicTokenParams{
-		Token:     rawToken,
-		ExpiresAt: now,
+		TokenHash: token.HashOpaque(rawToken),
+		Purpose:   token.MagicPurposeAdmin,
+		Now:       now,
 	})
 	if err != nil {
 		h.auditor.Log(ctx, audit.Event{
@@ -346,3 +430,6 @@ func generateToken() (string, error) {
 func extractIP(r *http.Request) string {
 	return audit.ClientIP(r)
 }
+
+// WaitForSends venter til asynkrone e-postsendinger er ferdige (tester og shutdown).
+func (h *AuthHandler) WaitForSends() { h.sendWG.Wait() }

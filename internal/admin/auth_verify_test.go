@@ -2,8 +2,14 @@ package admin
 
 import (
 	"context"
+	"html/template"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +19,7 @@ import (
 	"github.com/zral/kauth-go/internal/config"
 	"github.com/zral/kauth-go/internal/db"
 	"github.com/zral/kauth-go/internal/db/gen"
+	"github.com/zral/kauth-go/internal/mail"
 	"github.com/zral/kauth-go/internal/token"
 )
 
@@ -29,24 +36,125 @@ func newVerifyFixture(t *testing.T) (*AuthHandler, *gen.Queries, *token.Issuer) 
 
 	issuer := token.NewIssuerForTest()
 	h := &AuthHandler{queries: q, issuer: issuer, auditor: audit.NewNoop(),
-		cfg: &config.Config{AdminTokenTTL: 8 * time.Hour}}
+		cfg:       &config.Config{AdminTokenTTL: 8 * time.Hour},
+		verifyTpl: template.Must(template.ParseFiles("../../templates/admin/verify.html"))}
 	return h, q, issuer
 }
 
 func insertMagic(t *testing.T, q *gen.Queries, tok string, serviceID *string) {
 	t.Helper()
 	now := time.Now().UTC()
-	require.NoError(t, q.InsertMagicToken(context.Background(), gen.InsertMagicTokenParams{
-		Token: tok, Email: "konge@example.com", ServiceID: serviceID,
+	require.NoError(t, seedMagic(context.Background(), q, gen.InsertMagicTokenLimitedParams{
+		TokenHash: token.HashOpaque(tok), Purpose: purposeFor(serviceID), Email: "konge@example.com", ServiceID: serviceID,
 		CreatedAt: now.Format("2006-01-02T15:04:05Z"),
 		ExpiresAt: now.Add(15 * time.Minute).Format("2006-01-02T15:04:05Z"),
 	}))
 }
 
+// verify gjør bekreftelsen slik nettleseren gjør den: POST fra egen side.
 func verify(h *AuthHandler, tok string) *httptest.ResponseRecorder {
+	return verifyWith(h, tok, map[string]string{"Sec-Fetch-Site": "same-origin"})
+}
+
+func verifyWith(h *AuthHandler, tok string, headers map[string]string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
-	h.HandleVerify(w, httptest.NewRequest(http.MethodGet, "/admin/verify?token="+tok, nil))
+	req := httptest.NewRequest(http.MethodPost, "/admin/verify", strings.NewReader(url.Values{"token": {tok}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	h.HandleVerifyPost(w, req)
 	return w
+}
+
+func usedCount(t *testing.T, q *gen.Queries, tok string) int64 {
+	t.Helper()
+	_, err := q.GetValidMagicTokenByHash(context.Background(), gen.GetValidMagicTokenByHashParams{
+		TokenHash: token.HashOpaque(tok), Purpose: token.MagicPurposeAdmin, Now: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
+	if err == nil {
+		return 0
+	}
+	return 1
+}
+
+func TestAdminVerifyGet_DoesNotConsume(t *testing.T) {
+	h, q, _ := newVerifyFixture(t)
+	insertMagic(t, q, "admin-tok", nil)
+
+	w := httptest.NewRecorder()
+	h.HandleVerify(w, httptest.NewRequest(http.MethodGet, "/admin/verify?token=admin-tok", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	require.Contains(t, body, `<form method="post" action="/admin/verify"`)
+	require.Contains(t, body, `name="token" value="admin-tok"`)
+	require.NotContains(t, body, "<script")
+	require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	require.Empty(t, w.Result().Cookies())
+	require.Zero(t, usedCount(t, q, "admin-tok"), "GET skal ikke bruke opp tokenet")
+
+	// Ukjent token gir samme redirect som før.
+	w = httptest.NewRecorder()
+	h.HandleVerify(w, httptest.NewRequest(http.MethodGet, "/admin/verify?token=ukjent", nil))
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	require.Equal(t, "/admin/login?err=ugyldig_token", w.Header().Get("Location"))
+
+	// Tjenestetoken vises ikke som admin-bekreftelse.
+	require.NoError(t, q.CreateService(context.Background(), gen.CreateServiceParams{
+		ID: "klarsyn", DisplayName: "Klarsyn", Domain: "klarsyn.net",
+		CallbackUrl: "https://klarsyn.net/auth/callback", Theme: "light", AccentColor: "#000",
+		EmailFromName: "Klarsyn", JwtCookieName: "auth_token", AccessTokenTtl: "PT15M",
+		Active: 1, UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}))
+	svc := "klarsyn"
+	insertMagic(t, q, "svc-tok", &svc)
+	w = httptest.NewRecorder()
+	h.HandleVerify(w, httptest.NewRequest(http.MethodGet, "/admin/verify?token=svc-tok", nil))
+	require.Equal(t, http.StatusSeeOther, w.Code)
+}
+
+func TestAdminVerifyPost_SameOrigin_GivesAdminCookie(t *testing.T) {
+	h, q, issuer := newVerifyFixture(t)
+	insertMagic(t, q, "admin-tok", nil)
+
+	// Origin uten Sec-Fetch-Site er også godkjent.
+	w := verifyWith(h, "admin-tok", map[string]string{"Origin": "https://example.com"})
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	require.Equal(t, "/admin/users", w.Header().Get("Location"))
+	cookies := w.Result().Cookies()
+	require.Len(t, cookies, 1)
+	_, err := issuer.Verify(cookies[0].Value, token.ExpectAdmin)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, usedCount(t, q, "admin-tok"))
+}
+
+func TestAdminVerifyPost_CrossSite_403_NotConsumed(t *testing.T) {
+	h, q, _ := newVerifyFixture(t)
+	insertMagic(t, q, "admin-tok", nil)
+
+	for name, hdr := range map[string]map[string]string{
+		"cross-site":  {"Sec-Fetch-Site": "cross-site"},
+		"same-site":   {"Sec-Fetch-Site": "same-site"},
+		"none":        {"Sec-Fetch-Site": "none"},
+		"origin-null": {"Origin": "null"},
+		"ingen":       {},
+	} {
+		w := verifyWith(h, "admin-tok", hdr)
+		require.Equal(t, http.StatusForbidden, w.Code, name)
+		require.Empty(t, w.Result().Cookies(), name)
+		require.NotContains(t, w.Body.String(), "admin-tok", name)
+		require.Zero(t, usedCount(t, q, "admin-tok"), name)
+	}
+}
+
+func TestAdminVerifyTemplate_Parses(t *testing.T) {
+	_, err := template.ParseFiles("../../templates/admin/login.html")
+	require.NoError(t, err)
+	tpl, err := template.ParseFiles("../../templates/admin/verify.html")
+	require.NoError(t, err)
+	var sb strings.Builder
+	require.NoError(t, tpl.Execute(&sb, verifyPageData{Blocked: true}))
+	require.NotContains(t, sb.String(), "<script")
 }
 
 func TestHandleVerify_AdminMagicTokenGivesAdminCookie(t *testing.T) {
@@ -83,4 +191,89 @@ func TestHandleVerify_ServiceBoundTokenRejected(t *testing.T) {
 	require.Equal(t, http.StatusSeeOther, w.Code)
 	require.Equal(t, "/admin/login?err=ugyldig_token", w.Header().Get("Location"))
 	require.Empty(t, w.Result().Cookies())
+
+	// Motstridende rader: purpose=admin men med tjeneste, og purpose=service uten
+	// tjeneste. Ingen av dem skal gi admin-cookie.
+	now2 := time.Now().UTC()
+	for tok, row := range map[string]struct {
+		purpose string
+		sid     *string
+	}{"admin-med-tjeneste": {token.MagicPurposeAdmin, &svc}, "service-uten-tjeneste": {token.MagicPurposeService, nil}} {
+		require.NoError(t, seedMagic(context.Background(), q, gen.InsertMagicTokenLimitedParams{
+			TokenHash: token.HashOpaque(tok), Purpose: row.purpose, Email: "konge@example.com", ServiceID: row.sid,
+			CreatedAt: now2.Format("2006-01-02T15:04:05Z"),
+			ExpiresAt: now2.Add(15 * time.Minute).Format("2006-01-02T15:04:05Z"),
+		}))
+		w = verify(h, tok)
+		require.Equal(t, "/admin/login?err=ugyldig_token", w.Header().Get("Location"), tok)
+		require.Empty(t, w.Result().Cookies(), tok)
+	}
+}
+
+func purposeFor(serviceID *string) string {
+	if serviceID == nil {
+		return token.MagicPurposeAdmin
+	}
+	return token.MagicPurposeService
+}
+
+// K1: admin-magic-token lagres som SHA-256-hex med purpose=admin. Klarteksten
+// hentes fra lenken i den sendte e-posten, slik at testen skiller hash fra
+// klartekst (begge er 64 hex-tegn).
+func TestAdminMagicToken_StoredAsHash(t *testing.T) {
+	sqldb, q, err := db.OpenMemory()
+	require.NoError(t, err)
+	t.Cleanup(func() { sqldb.Close() })
+	_, err = q.CreateUser(context.Background(), gen.CreateUserParams{
+		Email: "konge@example.com", Roles: "konge", Orgs: "lars",
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+
+	mcfg := config.Config{SMTPMock: true}
+	h := &AuthHandler{queries: q, issuer: token.NewIssuerForTest(), auditor: audit.NewNoop(),
+		mailer: mail.New(mcfg), cfg: &config.Config{BaseURL: "https://kauth.test", AdminTokenTTL: 8 * time.Hour}}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/login",
+		strings.NewReader(url.Values{"email": {"konge@example.com"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	out := captureStdout(t, func() { require.NoError(t, h.tryIssueMagicLink(req)); h.sendWG.Wait() })
+	m := regexp.MustCompile(`/admin/verify\?token=([0-9a-f]+)`).FindStringSubmatch(out)
+	require.NotNil(t, m, out)
+	plain := m[1]
+
+	var stored, purpose string
+	require.NoError(t, sqldb.QueryRow("SELECT token, purpose FROM magic_tokens").Scan(&stored, &purpose))
+	require.Equal(t, token.HashOpaque(plain), stored)
+	require.NotEqual(t, plain, stored)
+	require.Equal(t, token.MagicPurposeAdmin, purpose)
+
+	// Den lagrede hashen er ikke selv en gyldig lenke-hemmelighet.
+	w := verify(h, stored)
+	require.Equal(t, "/admin/login?err=ugyldig_token", w.Header().Get("Location"))
+	// Klartekst fra lenken virker.
+	w = verify(h, plain)
+	require.Equal(t, "/admin/users", w.Header().Get("Location"))
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	pr, pw, err := os.Pipe()
+	require.NoError(t, err)
+	old := os.Stdout
+	os.Stdout = pw
+	defer func() { os.Stdout = old }()
+	fn()
+	os.Stdout = old
+	require.NoError(t, pw.Close())
+	b, _ := io.ReadAll(pr)
+	return string(b)
+}
+
+// seedMagic setter inn en rad uten å gå via kvoten: vindusstart i fremtiden
+// gir alltid telling 0.
+func seedMagic(ctx context.Context, q *gen.Queries, p gen.InsertMagicTokenLimitedParams) error {
+	p.WindowStart = "9999"
+	_, err := q.InsertMagicTokenLimited(ctx, p)
+	return err
 }

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
+
+	"github.com/zral/kauth-go/internal/db/gen"
 )
 
 func TestGoogleInitiate_SendsNonceFromState(t *testing.T) {
@@ -204,5 +207,110 @@ func TestGoogleFinish_BadNonce_RejectedInBothBranches(t *testing.T) {
 			require.NotNil(t, ev[0].Details)
 			require.Equal(t, "reason=nonce", *ev[0].Details)
 		})
+	}
+}
+
+func TestGoogleFinish_MixedCaseEmail_FindsExistingUser(t *testing.T) {
+	for _, tc := range []struct{ stored, idp string }{
+		{"Mixed@Case.no", "mixed@case.no"},
+		{"mixed@case.no", " Mixed@Case.NO"},
+	} {
+		t.Run(tc.stored, func(t *testing.T) {
+			f := newAdminFlowFixture(t)
+			existing, err := f.q.CreateUser(context.Background(), gen.CreateUserParams{Email: tc.stored, Roles: "user", CreatedAt: "2026-01-01T00:00:00Z"})
+			require.NoError(t, err)
+			before := f.countFn()
+
+			w := httptest.NewRecorder()
+			f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, false,
+				googleClaims{Email: tc.idp, EmailVerified: true}, "n", "n")
+
+			require.Equal(t, http.StatusFound, w.Code)
+			require.True(t, strings.HasPrefix(w.Header().Get("Location"), "/dispatch?"))
+			require.Equal(t, before, f.countFn(), "ingen ny rad")
+			u, err := f.q.GetUserByEmail(context.Background(), "mixed@case.no")
+			require.NoError(t, err)
+			require.Equal(t, existing.ID, u.ID)
+			require.NotNil(t, u.LastLogin, "innloggingen tilhører den eksisterende raden")
+		})
+	}
+}
+
+func TestGoogleFinish_NewUserStoredNormalized(t *testing.T) {
+	f := newAdminFlowFixture(t)
+	w := httptest.NewRecorder()
+	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, false,
+		googleClaims{Email: "New@Case.no", EmailVerified: true}, "n", "n")
+	require.Equal(t, http.StatusFound, w.Code)
+	u, err := f.q.GetUserByEmail(context.Background(), "new@case.no")
+	require.NoError(t, err)
+	require.Equal(t, "new@case.no", u.Email)
+}
+
+func TestGoogleFinish_CreateConflict_LoginFailedAudited(t *testing.T) {
+	f := newAdminFlowFixture(t)
+	u, err := f.q.CreateUser(context.Background(), gen.CreateUserParams{Email: "x@case.no", Roles: "user", CreatedAt: "2026-01-01T00:00:00Z"})
+	require.NoError(t, err)
+	now := "2026-01-02T00:00:00Z"
+	_, err = f.q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: u.ID})
+	require.NoError(t, err)
+	before := f.countFn()
+
+	w := httptest.NewRecorder()
+	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, false,
+		googleClaims{Email: "X@Case.no", EmailVerified: true}, "n", "n")
+
+	require.Equal(t, http.StatusSeeOther, w.Code)
+	require.Equal(t, "/login?error=login_failed&service=klarsyn", w.Header().Get("Location"))
+	require.Empty(t, w.Result().Cookies())
+	require.Equal(t, before, f.countFn())
+	ev := f.auditEvents(t, "google_oidc_rejected", 1)
+	require.NotNil(t, ev[0].Details)
+	require.Equal(t, "reason=user_conflict", *ev[0].Details)
+}
+
+func TestGoogleFindOrCreate_OnlyUniqueViolationIsConflict(t *testing.T) {
+	f := newAdminFlowFixture(t)
+	u, err := f.q.CreateUser(context.Background(), gen.CreateUserParams{Email: "x@case.no", Roles: "user", CreatedAt: "2026-01-01T00:00:00Z"})
+	require.NoError(t, err)
+	now := "2026-01-02T00:00:00Z"
+	_, err = f.q.DeactivateUser(context.Background(), gen.DeactivateUserParams{DeactivatedAt: &now, ID: u.ID})
+	require.NoError(t, err)
+
+	_, err = f.h.findOrCreate(context.Background(), "x@case.no", "X", f.svc)
+	require.ErrorIs(t, err, errUserConflict)
+
+	// Teknisk feil (kansellert kontekst) er ikke en kollisjon.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = f.h.findOrCreate(ctx, "ny@case.no", "N", f.svc)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, errUserConflict)
+	require.NotErrorIs(t, err, errNoAccount)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/callback", nil).WithContext(ctx)
+	f.h.finishCallback(w, req, f.svc, false, googleClaims{Email: "ny@case.no", EmailVerified: true}, "n", "n")
+	require.Equal(t, "/login?error=login_failed&service=klarsyn", w.Header().Get("Location"))
+}
+
+// Admin-grenen normaliserer e-posten også i audit, ikke bare i oppslaget.
+func TestCompleteAdminLogin_EmailNormalizedInAudit(t *testing.T) {
+	f := newAdminFlowFixture(t)
+	_, err := f.q.CreateUser(context.Background(), gen.CreateUserParams{Email: "admin@x.no", Roles: "user, konge", CreatedAt: "2026-01-01T00:00:00Z"})
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, true,
+		googleClaims{Email: " Admin@X.NO", EmailVerified: true}, "n", "n")
+	require.Equal(t, "/admin/users", w.Header().Get("Location"))
+
+	w = httptest.NewRecorder()
+	f.h.finishCallback(w, httptest.NewRequest(http.MethodGet, "/callback", nil), f.svc, true,
+		googleClaims{Email: " Admin@X.NO", EmailVerified: false}, "n", "n")
+	ev := f.auditEvents(t, "admin_google_login", 2)
+	for _, e := range ev {
+		require.NotNil(t, e.Email)
+		require.Equal(t, "admin@x.no", *e.Email)
 	}
 }

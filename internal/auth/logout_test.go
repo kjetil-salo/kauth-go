@@ -128,3 +128,68 @@ func TestLogout_CancelledContext_StillRevokes(t *testing.T) {
 	assert.Equal(t, 1, revoked)
 	assert.Equal(t, 1, byLogout)
 }
+
+// logoutWith sender GET /logout med Fetch Metadata-headere.
+func (f *refreshFx) logoutWith(cookie string, hdr map[string]string) *httptest.ResponseRecorder {
+	h := &auth.DispatchHandler{Registry: f.reg, Refresh: f.refSvc, Audit: audit.NewService(f.q)}
+	req := httptest.NewRequest("GET", "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: cookie})
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	h.ServeLogout(w, req)
+	return w
+}
+
+func assertLogoutRejected(t *testing.T, f *refreshFx, w *httptest.ResponseRecorder) {
+	t.Helper()
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Equal(t, "/login", w.Header().Get("Location"))
+	assert.Empty(t, w.Result().Cookies(), "ingen Set-Cookie")
+	_, revoked, _ := f.revokedCounts(t)
+	assert.Equal(t, 0, revoked)
+	time.Sleep(50 * time.Millisecond)
+	assert.Equal(t, 0, f.auditCount(t, "user_logout"))
+}
+
+func TestLogout_CrossSiteSubresource_NoRevokeNoSetCookie(t *testing.T) {
+	f, a, _ := newRefreshFx(t, nil, 0, nil)
+	rt, err := f.refSvc.Issue(context.Background(), f.user, a, "1.1.1.1", "ua")
+	require.NoError(t, err)
+	w := f.logoutWith(rt, map[string]string{
+		"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "image"})
+	assertLogoutRejected(t, f, w)
+}
+
+func TestLogout_CrossSiteIframe_NoRevoke(t *testing.T) {
+	f, a, _ := newRefreshFx(t, nil, 0, nil)
+	rt, err := f.refSvc.Issue(context.Background(), f.user, a, "1.1.1.1", "ua")
+	require.NoError(t, err)
+	w := f.logoutWith(rt, map[string]string{
+		"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "iframe"})
+	assertLogoutRejected(t, f, w)
+}
+
+func TestLogout_CrossSiteTopLevelNavigate_Revokes(t *testing.T) {
+	f, a, _ := newRefreshFx(t, nil, 0, nil)
+	rt, err := f.refSvc.Issue(context.Background(), f.user, a, "1.1.1.1", "ua")
+	require.NoError(t, err)
+	w := f.logoutWith(rt, map[string]string{
+		"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"})
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	_, revoked, _ := f.revokedCounts(t)
+	assert.Equal(t, 1, revoked)
+	f.waitAudit(t, "user_logout", 1)
+}
+
+func TestLogout_NoFetchMetadata_Revokes(t *testing.T) {
+	f, a, _ := newRefreshFx(t, nil, 0, nil)
+	rt, err := f.refSvc.Issue(context.Background(), f.user, a, "1.1.1.1", "ua")
+	require.NoError(t, err)
+	w := f.logoutWith(rt, nil)
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	_, revoked, _ := f.revokedCounts(t)
+	assert.Equal(t, 1, revoked)
+	f.waitAudit(t, "user_logout", 1)
+}

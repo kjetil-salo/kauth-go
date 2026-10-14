@@ -2,11 +2,20 @@
 INSERT INTO authorization_codes (code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
--- name: ConsumeAuthorizationCode :one
+-- name: ConsumeAuthorizationCodeChecked :one
 UPDATE authorization_codes
-SET used = 1
-WHERE code = ? AND used = 0 AND expires_at > ?
+SET used = 1, family_id = sqlc.arg(family_id)
+WHERE code = sqlc.arg(code_hash)
+  AND service_id = sqlc.arg(service_id)
+  AND redirect_uri = sqlc.arg(redirect_uri)
+  AND code_challenge = sqlc.arg(code_challenge)
+  AND code_challenge_method = 'S256'
+  AND used = 0
+  AND expires_at > sqlc.arg(now)
 RETURNING *;
+
+-- name: GetAuthorizationCodeByHash :one
+SELECT * FROM authorization_codes WHERE code = sqlc.arg(code_hash);
 
 -- Codes live 60 seconds, so a single threshold is enough here, unlike
 -- magic_tokens' longer grace period for unused tokens. See CHANGELOG for

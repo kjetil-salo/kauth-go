@@ -129,9 +129,14 @@ func VerifyPKCE(verifier, challenge, method string) bool {
 	if method != "S256" {
 		return false
 	}
+	return S256Challenge(verifier) == challenge
+}
+
+// S256Challenge er code_challenge for en verifier (RFC 7636 §4.2). Eksportert
+// fordi /token også bruker den som predikat i konsumet av koden.
+func S256Challenge(verifier string) string {
 	sum := sha256.Sum256([]byte(verifier))
-	computed := base64.RawURLEncoding.EncodeToString(sum[:])
-	return computed == challenge
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // redirectWithOIDCError sender brukeren tilbake til klienten med en

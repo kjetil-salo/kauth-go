@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -165,13 +164,20 @@ func (h *MicrosoftHandlers) auditRejected(r *http.Request, svc *gen.Service, tid
 		IP: ClientIP(r), UA: r.Header.Get("User-Agent"), Success: false, Details: details})
 }
 
+// auditRejectedUser avslag etter at claims er godkjent. Her er e-posten kjent og
+// normalisert, i motsetning til claims-avslag hvor tid er eneste kontekst.
+func (h *MicrosoftHandlers) auditRejectedUser(r *http.Request, svc *gen.Service, email, reason string) {
+	h.aud.Log(r.Context(), audit.Event{Type: "microsoft_oidc_rejected", AuthMethod: "microsoft", Email: email, ServiceID: svc.ID,
+		IP: ClientIP(r), UA: r.Header.Get("User-Agent"), Success: false, Details: "reason=" + reason})
+}
+
 // finishCallback tar over etter at id_token er signaturverifisert, slik at
 // claims-avslag og policy kan testes uten nettverk.
 func (h *MicrosoftHandlers) finishCallback(w http.ResponseWriter, r *http.Request, svc *gen.Service, cl msClaims, stateNonce string) {
 	ctx := r.Context()
 	ip, ua := ClientIP(r), r.Header.Get("User-Agent")
 	email, reason := validateMSClaims(cl, stateNonce)
-	email = strings.TrimSpace(email)
+	email = NormalizeEmail(email)
 	if reason != "" {
 		h.auditRejected(r, svc, cl.Tid, reason)
 		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
@@ -181,6 +187,12 @@ func (h *MicrosoftHandlers) finishCallback(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, errNoAccount) {
 			redirectLoginError(w, r, svc.ID, errCodeAccessDenied)
+			return
+		}
+		if errors.Is(err, errUserConflict) {
+			slog.Warn("microsoft: auto-registrering kolliderte med eksisterende rad", "service", svc.ID, "error", err)
+			h.auditRejectedUser(r, svc, email, "user_conflict")
+			redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 			return
 		}
 		slog.Error("microsoft: kunne ikke opprette bruker", "error", err)
@@ -229,13 +241,21 @@ func (h *MicrosoftHandlers) findOrCreate(ctx context.Context, email, name string
 	if svc.DefaultOrg != nil {
 		org = *svc.DefaultOrg
 	}
-	return h.queries.CreateUser(ctx, gen.CreateUserParams{
+	u, err = h.queries.CreateUser(ctx, gen.CreateUserParams{
 		Email:     email,
 		Name:      &name,
 		Roles:     role,
 		Orgs:      org,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	})
+	if err != nil {
+		if !isUniqueViolation(err) {
+			return gen.User{}, err
+		}
+		// Typisk en deaktivert konto med samme normaliserte e-post (unik indeks).
+		return gen.User{}, fmt.Errorf("%w: %v", errUserConflict, err)
+	}
+	return u, nil
 }
 
 func msCreds(cfg config.Config, svc *gen.Service) (id, secret string) {

@@ -44,7 +44,7 @@ func setupCheckPolicyService(t *testing.T, q *gen.Queries, id string, requireRol
 		ID: id, DisplayName: id, Domain: id + ".test",
 		CallbackUrl: "https://" + id + ".test/auth/callback",
 		Theme:       "light", AccentColor: "#000", EmailFromName: id,
-		AuthPassword: 1, RequireRole: requireRole,
+		AuthPassword: 1, AuthMagicLink: 1, RequireRole: requireRole,
 		JwtCookieName: "auth_token", AccessTokenTtl: "PT15M",
 		Active: 1, UpdatedAt: now,
 	}))
@@ -99,8 +99,8 @@ func TestMagicLinkVerify_RejectsUserWithoutRequiredRole(t *testing.T) {
 	require.NoError(t, err)
 
 	plainToken := "test-magic-token-12345"
-	require.NoError(t, q.InsertMagicToken(ctx, gen.InsertMagicTokenParams{
-		Token: plainToken, Email: user.Email, ServiceID: strPtrCP("restricted"),
+	require.NoError(t, seedMagic(ctx, q, gen.InsertMagicTokenLimitedParams{
+		TokenHash: token.HashOpaque(plainToken), Purpose: token.MagicPurposeService, Email: user.Email, ServiceID: strPtrCP("restricted"),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		ExpiresAt: time.Now().UTC().Add(15 * time.Minute).Format(time.RFC3339),
 	}))
@@ -115,13 +115,14 @@ func TestMagicLinkVerify_RejectsUserWithoutRequiredRole(t *testing.T) {
 
 	h := auth.NewMagicHandlers(config.Config{}, q, mailSvc, iss, refSvc, reg, aud, tmpl)
 
-	req := httptest.NewRequest(http.MethodGet, "/magic-login/"+plainToken+"?service=restricted", nil)
+	req := httptest.NewRequest(http.MethodPost, "/magic-login/"+plainToken+"?service=restricted", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("token", plainToken)
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 
 	w := httptest.NewRecorder()
-	h.VerifyToken(w, req)
+	h.Redeem(w, req)
 
 	require.Equal(t, http.StatusFound, w.Code)
 	loc := w.Header().Get("Location")
@@ -174,4 +175,12 @@ func TestDoLogin_GlobalSwitchOffReturns403(t *testing.T) {
 	assert.Equal(t, http.StatusFound, on.Code, "bryter på: som før")
 	assert.Contains(t, on.Header().Get("Location"), "/dispatch?")
 	assert.NotEmpty(t, on.Result().Cookies(), "refresh-cookie settes")
+}
+
+// seedMagic setter inn en rad uten å gå via kvoten: vindusstart i fremtiden
+// gir alltid telling 0.
+func seedMagic(ctx context.Context, q *gen.Queries, p gen.InsertMagicTokenLimitedParams) error {
+	p.WindowStart = "9999"
+	_, err := q.InsertMagicTokenLimited(ctx, p)
+	return err
 }

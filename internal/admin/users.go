@@ -26,12 +26,12 @@ const usersPerPage = 25
 // UsersHandler håndterer alle bruker-CRUD-ruter i admin-panelet.
 type UsersHandler struct {
 	queries *gen.Queries
-	auditor *audit.Service
+	auditor auditLogger
 	listTpl *template.Template
 	editTpl *template.Template
 }
 
-func NewUsersHandler(queries *gen.Queries, auditor *audit.Service) *UsersHandler {
+func NewUsersHandler(queries *gen.Queries, auditor auditLogger) *UsersHandler {
 	listTpl := template.Must(template.ParseFiles("templates/admin/users.html"))
 	editTpl := template.Must(template.ParseFiles("templates/admin/user-edit.html"))
 	return &UsersHandler{
@@ -40,6 +40,13 @@ func NewUsersHandler(queries *gen.Queries, auditor *audit.Service) *UsersHandler
 		listTpl: listTpl,
 		editTpl: editTpl,
 	}
+}
+
+func usersRedirect(auditOK bool) string {
+	if auditOK {
+		return "/admin/users"
+	}
+	return redirectWithWarns("/admin/users", "audit")
 }
 
 // HandleList rendrer bruker-tabellen med paginering og filtrering.
@@ -133,6 +140,7 @@ func (h *UsersHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 		TotalPages int
 		PrevPage   int
 		NextPage   int
+		WarnAudit  bool
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -140,6 +148,7 @@ func (h *UsersHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 		Users: users, Search: search, Org: org,
 		Page: page, TotalPages: totalPages,
 		PrevPage: prevPage, NextPage: nextPage,
+		WarnAudit: warnFlags(r, "audit")["audit"],
 	})
 }
 
@@ -155,11 +164,11 @@ func (h *UsersHandler) HandleNew(w http.ResponseWriter, r *http.Request) {
 // HandleCreate oppretter ny bruker fra POST-skjema.
 func (h *UsersHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
-	email := strings.TrimSpace(strings.ToLower(r.FormValue("email")))
-	password := r.FormValue("password")
-	name := strings.TrimSpace(r.FormValue("name"))
-	roles := strings.TrimSpace(r.FormValue("roles"))
-	orgs := strings.TrimSpace(r.FormValue("orgs"))
+	email := strings.TrimSpace(strings.ToLower(r.PostFormValue("email")))
+	password := r.PostFormValue("password")
+	name := strings.TrimSpace(r.PostFormValue("name"))
+	roles := strings.TrimSpace(r.PostFormValue("roles"))
+	orgs := strings.TrimSpace(r.PostFormValue("orgs"))
 
 	if email == "" {
 		h.renderEditError(w, gen.User{Roles: roles, Orgs: orgs}, true, email, "E-post er påkrevd.")
@@ -196,14 +205,14 @@ func (h *UsersHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.auditor.Log(r.Context(), audit.Event{
+	auditOK := logAdminWrite(r.Context(), h.auditor, audit.Event{
 		Type:    "user_created",
 		Email:   email,
 		IP:      extractIP(r),
 		UA:      r.UserAgent(),
 		Success: true,
 	})
-	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+	http.Redirect(w, r, usersRedirect(auditOK), http.StatusSeeOther)
 }
 
 // HandleEdit rendrer redigeringsskjema for eksisterende bruker.
@@ -250,9 +259,9 @@ func (h *UsersHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = r.ParseForm()
-	name := strings.TrimSpace(r.FormValue("name"))
-	roles := strings.TrimSpace(r.FormValue("roles"))
-	orgs := strings.TrimSpace(r.FormValue("orgs"))
+	name := strings.TrimSpace(r.PostFormValue("name"))
+	roles := strings.TrimSpace(r.PostFormValue("roles"))
+	orgs := strings.TrimSpace(r.PostFormValue("orgs"))
 
 	var namePtr *string
 	if name != "" {
@@ -270,14 +279,14 @@ func (h *UsersHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.auditor.Log(r.Context(), audit.Event{
+	auditOK := logAdminWrite(r.Context(), h.auditor, audit.Event{
 		Type:    "user_edited",
 		IP:      extractIP(r),
 		UA:      r.UserAgent(),
 		Success: true,
 		Details: fmt.Sprintf("id=%d", id),
 	})
-	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+	http.Redirect(w, r, usersRedirect(auditOK), http.StatusSeeOther)
 }
 
 // HandleDeactivate deaktiverer en bruker.
@@ -306,7 +315,7 @@ func (h *UsersHandler) HandleDeactivate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// WithoutCancel: revokeringen skal fullføres selv om admin kobler fra.
+	// WithoutCancel: revokeringen og auditraden skal fullføres selv om admin kobler fra.
 	// Feiler den, står deaktiveringen; refresh for en deaktivert bruker avvises
 	// uansett (refresh_user_inactive).
 	ctx := context.WithoutCancel(r.Context())
@@ -323,7 +332,7 @@ func (h *UsersHandler) HandleDeactivate(w http.ResponseWriter, r *http.Request) 
 		details = fmt.Sprintf("id=%d revoked=%d", id, revoked)
 	}
 
-	h.auditor.Log(ctx, audit.Event{
+	auditOK := logAdminWrite(ctx, h.auditor, audit.Event{
 		Type:    "user_deactivated",
 		Email:   email,
 		IP:      extractIP(r),
@@ -331,7 +340,7 @@ func (h *UsersHandler) HandleDeactivate(w http.ResponseWriter, r *http.Request) 
 		Success: true,
 		Details: details,
 	})
-	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+	http.Redirect(w, r, usersRedirect(auditOK), http.StatusSeeOther)
 }
 
 // HandleExport skriver alle brukere som CSV.

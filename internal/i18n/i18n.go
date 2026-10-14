@@ -45,6 +45,13 @@ type Strings struct {
 	MagicValidMinutes string
 	BackToSignIn      string
 
+	// magic-confirm.html: bekreftelsessiden på GET /magic-login/{token}.
+	// MagicConfirmBlocked vises ved 403 når POST-en ikke kom fra vår egen side.
+	MagicConfirmTitle   string
+	MagicConfirmButton  string
+	MagicConfirmHint    string
+	MagicConfirmBlocked string
+
 	// Feilkoder fra ?error=
 	ErrAccessDenied    string
 	ErrInvalidRedirect string

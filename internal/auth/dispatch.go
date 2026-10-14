@@ -12,6 +12,7 @@ import (
 
 	"github.com/zral/kauth-go/internal/audit"
 	"github.com/zral/kauth-go/internal/db/gen"
+	"github.com/zral/kauth-go/internal/fetchmeta"
 	"github.com/zral/kauth-go/internal/service"
 	"github.com/zral/kauth-go/internal/token"
 )
@@ -141,7 +142,7 @@ func (h *DispatchHandler) ServeDispatch(w http.ResponseWriter, r *http.Request) 
 		}
 		expiresAt := time.Now().UTC().Add(60 * time.Second).Format("2006-01-02T15:04:05Z")
 		err = h.Queries.InsertAuthorizationCode(r.Context(), gen.InsertAuthorizationCodeParams{
-			Code:                code,
+			Code:                token.HashOpaque(code),
 			ServiceID:           oidcReq.ClientID,
 			Email:               claims.Email,
 			RedirectUri:         oidcReq.RedirectURI,
@@ -283,6 +284,18 @@ func (h *DispatchHandler) logServiceMismatch(r *http.Request, email, loginSvc, t
 // ServeLogout håndterer GET /logout.
 // Sletter auth_token og refresh_token, redirecter til redirect_uri eller /login.
 func (h *DispatchHandler) ServeLogout(w http.ResponseWriter, r *http.Request) {
+	// Cross-site underressurs eller iframe skal ikke logge brukeren ut. Da
+	// rører vi hverken familie eller cookies (en sletting ville uansett ikke
+	// virke pålitelig cross-site, og ville etterlatt en levende familie uten eier).
+	if !fetchmeta.LogoutAllowed(r) {
+		slog.Info("logout: cross-site forespørsel avvist uten revokering",
+			"sec_fetch_site", r.Header.Get("Sec-Fetch-Site"),
+			"sec_fetch_mode", r.Header.Get("Sec-Fetch-Mode"),
+			"sec_fetch_dest", r.Header.Get("Sec-Fetch-Dest"))
+		h.redirectAfterLogout(w, r)
+		return
+	}
+
 	defaultSvc := h.Registry.ResolveOrDefault("", h.DefaultSvcID, "")
 
 	// Slett auth_token-cookie
@@ -315,6 +328,13 @@ func (h *DispatchHandler) ServeLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
+	h.redirectAfterLogout(w, r)
+}
+
+// redirectAfterLogout sender til oppgitt redirect_uri hvis den er registrert,
+// ellers /login. Felles for tillatt og avvist logout, slik at svaret ikke
+// røper hvilken vei forespørselen tok.
+func (h *DispatchHandler) redirectAfterLogout(w http.ResponseWriter, r *http.Request) {
 	// Redirect til oppgitt URI hvis den er registrert, ellers /login
 	if redirectURI := r.URL.Query().Get("redirect_uri"); redirectURI != "" {
 		allSvcs := h.Registry.All()

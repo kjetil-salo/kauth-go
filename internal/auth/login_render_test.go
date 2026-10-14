@@ -302,7 +302,7 @@ func TestLoginTemplate_TaglineFallsBackToDatabase(t *testing.T) {
 }
 
 // TestMagicLoginTemplate_TranslatesNoAccount dekker no_account-grenen, som
-// VerifyToken redirecter til når tjenesten ikke har auto-registrering. Uten
+// Redeem redirecter til når tjenesten ikke har auto-registrering. Uten
 // denne kjøres grenen aldri av suiten, og en skrivefeil i .T.ErrNoAccount ville
 // gitt en stille trunkert side (magic.go forkaster render-feilen).
 func TestMagicLoginTemplate_TranslatesNoAccount(t *testing.T) {

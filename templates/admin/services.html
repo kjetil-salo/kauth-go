@@ -39,7 +39,8 @@
 </nav>
 <main>
     <h1>Tjenester</h1>
-    {{if eq .Warn "cache"}}<div class="warn" role="alert">Lagret, men ikke aktivert. Lagre på nytt eller restart kauth.</div>{{end}}
+    {{if .WarnCache}}<div class="warn" role="alert">Lagret, men ikke aktivert. Lagre på nytt eller restart kauth.</div>{{end}}
+    {{if .WarnAudit}}<div class="warn" role="alert">Lagret, men ikke auditert. Sjekk loggen.</div>{{end}}
     <div class="toolbar">
         <a href="/admin/services/new" class="btn btn-primary btn-sm">+ Ny tjeneste</a>
     </div>

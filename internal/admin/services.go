@@ -27,7 +27,7 @@ import (
 type ServicesHandler struct {
 	queries  *gen.Queries
 	registry *service.Registry
-	auditor  *audit.Service
+	auditor  auditLogger
 	listTpl  *template.Template
 	editTpl  *template.Template
 }
@@ -35,7 +35,7 @@ type ServicesHandler struct {
 func NewServicesHandler(
 	queries *gen.Queries,
 	registry *service.Registry,
-	auditor *audit.Service,
+	auditor auditLogger,
 ) *ServicesHandler {
 	listTpl := template.Must(template.ParseFiles("templates/admin/services.html"))
 	editTpl := template.Must(template.ParseFiles("templates/admin/service-edit.html"))
@@ -48,14 +48,14 @@ func NewServicesHandler(
 	}
 }
 
-// invalidateCache returnerer redirect-målet. Lagringen er allerede utført og rulles
-// ikke tilbake; ellers ville admin tro at tjenesten er aktiv når cachen er utdatert.
-func (h *ServicesHandler) invalidateCache(r *http.Request, serviceID string) string {
+// invalidateCache returnerer false når cachen er utdatert. Lagringen er allerede
+// utført og rulles ikke tilbake; ellers ville admin tro at tjenesten er aktiv.
+func (h *ServicesHandler) invalidateCache(r *http.Request, serviceID string) bool {
 	if err := h.registry.Invalidate(r.Context()); err != nil {
 		slog.Error("admin: cache-invalidering feilet etter lagring av tjeneste", "service_id", serviceID, "error", err)
-		return "/admin/services?warn=cache"
+		return false
 	}
-	return "/admin/services"
+	return true
 }
 
 // HandleList viser alle tjenester (aktive og inaktive).
@@ -67,11 +67,10 @@ func (h *ServicesHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Bare faste koder gir tekst i malen; verdien fra query-strengen speiles aldri.
-	warn := ""
-	if r.URL.Query().Get("warn") == "cache" {
-		warn = "cache"
-	}
-	_ = h.listTpl.Execute(w, map[string]interface{}{"Services": services, "Warn": warn})
+	warns := warnFlags(r, "cache", "audit")
+	_ = h.listTpl.Execute(w, map[string]interface{}{
+		"Services": services, "WarnCache": warns["cache"], "WarnAudit": warns["audit"],
+	})
 }
 
 // HandleNew rendrer skjema for ny tjeneste med fornuftige standardverdier.
@@ -98,13 +97,13 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svcID := strings.TrimSpace(r.FormValue("id"))
+	svcID := strings.TrimSpace(r.PostFormValue("id"))
 	if svcID == "" {
 		h.renderServiceError(w, serviceFromForm(r), true, "Tjeneste-ID er påkrevd.")
 		return
 	}
 
-	if err := validateAuthHost(r.FormValue("auth_host")); err != nil {
+	if err := validateAuthHost(r.PostFormValue("auth_host")); err != nil {
 		h.renderServiceError(w, serviceFromForm(r), true, err.Error())
 		return
 	}
@@ -120,7 +119,7 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if uploaded {
-		r.Form.Set("bg_image", uploadedPath)
+		r.PostForm.Set("bg_image", uploadedPath)
 	}
 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
@@ -130,13 +129,13 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectTo := h.invalidateCache(r, svcID)
+	cacheOK := h.invalidateCache(r, svcID)
 
 	details := "service_created"
 	if uploaded {
 		details = "service_created bg_image_uploaded=" + uploadedPath
 	}
-	h.auditor.Log(r.Context(), audit.Event{
+	auditOK := logAdminWrite(r.Context(), h.auditor, audit.Event{
 		Type:      "service_created",
 		ServiceID: svcID,
 		IP:        extractIP(r),
@@ -144,7 +143,7 @@ func (h *ServicesHandler) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		Details:   details,
 		Success:   true,
 	})
-	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+	http.Redirect(w, r, savedRedirect(cacheOK, auditOK), http.StatusSeeOther)
 }
 
 // HandleEdit rendrer redigeringsskjema for eksisterende tjeneste.
@@ -190,14 +189,14 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
-	if err := validateAuthHost(r.FormValue("auth_host")); err != nil {
+	if err := validateAuthHost(r.PostFormValue("auth_host")); err != nil {
 		h.renderServiceError(w, overlayForm(*existing, r), false, err.Error())
 		return
 	}
 
-	if strings.TrimSpace(r.FormValue("display_name")) == "" ||
-		strings.TrimSpace(r.FormValue("domain")) == "" ||
-		strings.TrimSpace(r.FormValue("callback_url")) == "" {
+	if strings.TrimSpace(r.PostFormValue("display_name")) == "" ||
+		strings.TrimSpace(r.PostFormValue("domain")) == "" ||
+		strings.TrimSpace(r.PostFormValue("callback_url")) == "" {
 		h.renderServiceError(w, overlayForm(*existing, r), false, "Visningsnavn, domene og callback-URL er påkrevd.")
 		return
 	}
@@ -213,7 +212,7 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if uploaded {
-		r.Form.Set("bg_image", uploadedPath)
+		r.PostForm.Set("bg_image", uploadedPath)
 	}
 
 	params := buildUpdateParams(r, *existing, now)
@@ -222,13 +221,13 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	redirectTo := h.invalidateCache(r, id)
+	cacheOK := h.invalidateCache(r, id)
 
 	details := "service_edited"
 	if uploaded {
 		details = "service_edited bg_image_uploaded=" + uploadedPath
 	}
-	h.auditor.Log(r.Context(), audit.Event{
+	auditOK := logAdminWrite(r.Context(), h.auditor, audit.Event{
 		Type:      "service_edited",
 		ServiceID: id,
 		IP:        extractIP(r),
@@ -236,7 +235,7 @@ func (h *ServicesHandler) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		Details:   details,
 		Success:   true,
 	})
-	http.Redirect(w, r, redirectTo, http.StatusSeeOther)
+	http.Redirect(w, r, savedRedirect(cacheOK, auditOK), http.StatusSeeOther)
 }
 
 // handleBgImageUpload leser bg_image_upload fra multipart-skjema.
@@ -300,31 +299,31 @@ func handleBgImageUpload(r *http.Request, svcID string) (bool, string, string) {
 func buildCreateParams(r *http.Request, id, now string) gen.CreateServiceParams {
 	return gen.CreateServiceParams{
 		ID:                 id,
-		DisplayName:        r.FormValue("display_name"),
-		Tagline:            nullableStr(r.FormValue("tagline")),
-		Domain:             r.FormValue("domain"),
-		AuthHost:           nullableStr(r.FormValue("auth_host")),
-		CallbackUrl:        r.FormValue("callback_url"),
-		LogoHtml:           nullableStr(r.FormValue("logo_html")),
-		BgImage:            nullableStr(r.FormValue("bg_image")),
-		BgCss:              nullableStr(r.FormValue("bg_css")),
-		Theme:              defaultStr(r.FormValue("theme"), "light"),
-		AccentColor:        defaultStr(r.FormValue("accent_color"), "#2563EB"),
-		EmailFromName:      defaultStr(r.FormValue("email_from_name"), id),
-		EmailFromAddress:   nullableStr(r.FormValue("email_from_address")),
+		DisplayName:        r.PostFormValue("display_name"),
+		Tagline:            nullableStr(r.PostFormValue("tagline")),
+		Domain:             r.PostFormValue("domain"),
+		AuthHost:           nullableStr(r.PostFormValue("auth_host")),
+		CallbackUrl:        r.PostFormValue("callback_url"),
+		LogoHtml:           nullableStr(r.PostFormValue("logo_html")),
+		BgImage:            nullableStr(r.PostFormValue("bg_image")),
+		BgCss:              nullableStr(r.PostFormValue("bg_css")),
+		Theme:              defaultStr(r.PostFormValue("theme"), "light"),
+		AccentColor:        defaultStr(r.PostFormValue("accent_color"), "#2563EB"),
+		EmailFromName:      defaultStr(r.PostFormValue("email_from_name"), id),
+		EmailFromAddress:   nullableStr(r.PostFormValue("email_from_address")),
 		AutoRegister:       checkboxInt(r, "auto_register"),
-		DefaultRole:        nullableStr(r.FormValue("default_role")),
-		DefaultOrg:         nullableStr(r.FormValue("default_org")),
-		RequireRole:        nullableStr(r.FormValue("require_role")),
+		DefaultRole:        nullableStr(r.PostFormValue("default_role")),
+		DefaultOrg:         nullableStr(r.PostFormValue("default_org")),
+		RequireRole:        nullableStr(r.PostFormValue("require_role")),
 		EnforceOrg:         checkboxInt(r, "enforce_org"),
 		IsDefault:          checkboxInt(r, "is_default"),
 		AuthGoogle:         checkboxInt(r, "auth_google"),
 		AuthMicrosoft:      checkboxInt(r, "auth_microsoft"),
 		AuthMagicLink:      checkboxInt(r, "auth_magic_link"),
 		AuthPassword:       checkboxInt(r, "auth_password"),
-		JwtCookieName:      defaultStr(r.FormValue("jwt_cookie_name"), "auth_token"),
-		AccessTokenTtl:     defaultStr(r.FormValue("access_token_ttl"), "PT15M"),
-		RefreshTokenMaxAge: nullableStr(r.FormValue("refresh_token_max_age")),
+		JwtCookieName:      defaultStr(r.PostFormValue("jwt_cookie_name"), "auth_token"),
+		AccessTokenTtl:     defaultStr(r.PostFormValue("access_token_ttl"), "PT15M"),
+		RefreshTokenMaxAge: nullableStr(r.PostFormValue("refresh_token_max_age")),
 		Active:             checkboxInt(r, "active"),
 		UpdatedAt:          now,
 	}
@@ -431,7 +430,7 @@ func defaultStr(s, def string) string {
 }
 
 func checkboxInt(r *http.Request, name string) int64 {
-	if r.FormValue(name) == "1" {
+	if r.PostFormValue(name) == "1" {
 		return 1
 	}
 	return 0
@@ -440,7 +439,7 @@ func checkboxInt(r *http.Request, name string) int64 {
 // validateEnforceOrg avviser enforce_org uten default_org. checkPolicy (internal/auth/google.go)
 // krever DefaultOrg != nil, så kombinasjonen ville slått av org-håndhevingen uten varsel.
 func validateEnforceOrg(r *http.Request) error {
-	if checkboxInt(r, "enforce_org") == 1 && nullableStr(r.FormValue("default_org")) == nil {
+	if checkboxInt(r, "enforce_org") == 1 && nullableStr(r.PostFormValue("default_org")) == nil {
 		return fmt.Errorf("Krev org-samsvar (enforce_org) forutsetter en standard org. Fyll ut standard org eller fjern avkryssingen.")
 	}
 	return nil
@@ -449,23 +448,23 @@ func validateEnforceOrg(r *http.Request) error {
 // serviceFromForm bygger en gen.Service fra alle skjemafelt for feilrendering.
 func serviceFromForm(r *http.Request) gen.Service {
 	return gen.Service{
-		ID:                 r.FormValue("id"),
-		DisplayName:        r.FormValue("display_name"),
-		Tagline:            nullableStr(r.FormValue("tagline")),
-		Domain:             r.FormValue("domain"),
-		AuthHost:           nullableStr(r.FormValue("auth_host")),
-		EmailFromName:      r.FormValue("email_from_name"),
-		EmailFromAddress:   nullableStr(r.FormValue("email_from_address")),
-		CallbackUrl:        r.FormValue("callback_url"),
-		BgImage:            nullableStr(r.FormValue("bg_image")),
-		AccentColor:        defaultStr(r.FormValue("accent_color"), "#2563EB"),
-		Theme:              defaultStr(r.FormValue("theme"), "light"),
-		JwtCookieName:      defaultStr(r.FormValue("jwt_cookie_name"), "auth_token"),
-		AccessTokenTtl:     defaultStr(r.FormValue("access_token_ttl"), "PT15M"),
-		RefreshTokenMaxAge: nullableStr(r.FormValue("refresh_token_max_age")),
-		DefaultRole:        nullableStr(r.FormValue("default_role")),
-		DefaultOrg:         nullableStr(r.FormValue("default_org")),
-		RequireRole:        nullableStr(r.FormValue("require_role")),
+		ID:                 r.PostFormValue("id"),
+		DisplayName:        r.PostFormValue("display_name"),
+		Tagline:            nullableStr(r.PostFormValue("tagline")),
+		Domain:             r.PostFormValue("domain"),
+		AuthHost:           nullableStr(r.PostFormValue("auth_host")),
+		EmailFromName:      r.PostFormValue("email_from_name"),
+		EmailFromAddress:   nullableStr(r.PostFormValue("email_from_address")),
+		CallbackUrl:        r.PostFormValue("callback_url"),
+		BgImage:            nullableStr(r.PostFormValue("bg_image")),
+		AccentColor:        defaultStr(r.PostFormValue("accent_color"), "#2563EB"),
+		Theme:              defaultStr(r.PostFormValue("theme"), "light"),
+		JwtCookieName:      defaultStr(r.PostFormValue("jwt_cookie_name"), "auth_token"),
+		AccessTokenTtl:     defaultStr(r.PostFormValue("access_token_ttl"), "PT15M"),
+		RefreshTokenMaxAge: nullableStr(r.PostFormValue("refresh_token_max_age")),
+		DefaultRole:        nullableStr(r.PostFormValue("default_role")),
+		DefaultOrg:         nullableStr(r.PostFormValue("default_org")),
+		RequireRole:        nullableStr(r.PostFormValue("require_role")),
 		EnforceOrg:         checkboxInt(r, "enforce_org"),
 		Active:             checkboxInt(r, "active"),
 		AuthGoogle:         checkboxInt(r, "auth_google"),

@@ -92,3 +92,33 @@ Sentral beslutningslogg for arkitektur- og designvalg i kauth-go. Hver ADN er en
 - Ingen migrasjon og ingen endring i tokens eller claims. Innlogginger som pågår rundt deploy, feiler én gang.
 - Et ekte refresh-race logger nå ut begge parter i stedet for tilfeldig den ene.
 - Varig identitet på `(tid, oid)` og `tid`-allowlist per tjeneste kommer i Fase 2/5 (ROADMAP B1, B5).
+
+---
+
+## ADN 11 — Engangshemmeligheter lagres som hash og brukes opp bare ved en bevisst handling fra samme origin. Admin-tilgang og audit følger DB-en (2026-10-13)
+
+**Status:** Vedtatt (2026-10-14)
+→ Analyse: [doc/features/009_AN_HERD_FLYTER_DEL2.md](features/009_AN_HERD_FLYTER_DEL2.md)
+
+**Beslutning:**
+1. **Alle engangshemmeligheter lagres bare som SHA-256-hash**, slik refresh-tokens allerede gjør. Det gjelder magic-tokens (tjeneste og admin) og autorisasjonskoder. Hashingen skjer i én funksjon i `internal/token`. Skjemaendringer er additive (`ADD COLUMN`, tømming), slik at rollback fortsatt er forrige binær.
+2. **En GET bruker aldri opp en hemmelighet.** En magic link viser en bekreftelsesside med én knapp. Konsumet skjer på POST. Det gjelder også `/admin/verify`. Siden har tjenestens tema og viser ikke e-postadressen.
+3. **Tilstandsendrende POST fra nettleseren krever samme origin:** `Sec-Fetch-Site: same-origin`, eller, når headeren mangler, en `Origin` lik egen origin. `same-site` er ikke nok, fordi søster-apper under samme domene er trusselen. `Origin: null` godtas aldri (ADN 9-tillegget). Sjekken er middleware for hele `/admin` og brukes også på bekreftelses-POST for magic link.
+4. **`/logout` forblir GET**, men revokerer og sletter cookies bare ved bevisst navigasjon: samme origin eller same-site, toppnivå-navigasjon (`Mode=navigate`, `Dest=document`), eller ingen `Sec-Fetch-*`. Cross-site-underressurser og iframes endrer ingenting.
+5. **Tjenesten til et magic-token er den lagrede.** URL-en er bare et tema-hint. Formålet (`service`/`admin`) er en egen kolonne som håndheves i `WHERE`. Rate limit er en betinget innsetting i DB per normalisert e-post og formål, så innsetting, limit og «ingen e-post ved feil» er én operasjon.
+6. **En autorisasjonskode brennes bare når klient, `redirect_uri` og PKCE stemmer.** Konsum og første refresh-rad er én transaksjon, og koden husker familien sin. Gjenbruk revokerer den familien (RFC 6749 §4.1.2).
+7. **Admin-tilgang slås opp i DB ved hver forespørsel.** Det signerte admin-tokenet er nødvendig, men ikke tilstrekkelig. Deaktivering eller fjernet `konge` virker umiddelbart.
+8. **Audit skrives via en begrenset kø med én skriver, og køen tømmes ved shutdown.** Ved full kø droppes hendelser med tellende logg. Admin-skriv auditeres synkront med aktør. `/token` og innlogging blokkeres aldri av audit.
+9. **E-post normaliseres (`trim` + `lower`) ved inngang**, og databasen har en unik indeks på normalisert e-post, slik at duplikater ikke kan oppstå stille.
+
+**Begrunnelse:** ADN 9 sa at kauth skal stole på sin egen tilstand, ikke på URL-en. 009 utvider prinsippet til nettleseren og til lagring: en lenke som åpnes av en e-postskanner, en POST fra en søster-app og et 8-timers JWT for en admin som er fjernet, er alle tilfeller der kauth handler på noe den ikke har sjekket. Klartekst-hemmeligheter i DB gjør en lesbar backup til en innlogging. Fetch Metadata gir CSRF-vern uten ny tilstand og uten endring i skjemaene, og `Referrer-Policy: no-referrer` (007 F5) gjør `Origin` alene ubrukelig. Prod-data (0 rader i begge engangstabellene, 0 e-poster som ikke er normalisert, maks 4 audit-hendelser/s) gjør endringene trygge å innføre nå.
+
+**Konsekvens:**
+- Magic link krever ett ekstra klikk. Lenker i omløp ved deploy (≤ 15 min) blir ugyldige.
+- Nettlesere som verken sender `Sec-Fetch-Site` eller `Origin` kan ikke bekrefte magic link eller bruke admin (fail-closed, under produktbeslutning PB2 i analysen).
+- To additive migrasjoner (`purpose` og `family_id`, og unik indeks på `lower(trim(email))`). Tokens og claims er uendret.
+- Access-tokens fra en gjenbrukt kode lever ut TTL til `jti` finnes (H5, 010).
+- Limit per IP på bestilling av magic link står igjen (BACKLOG).
+- Akseptert restrisiko, login-CSRF (P1): bekreftelsessiden viser ikke e-postadressen. Et offer som trykker på en lenke en angriper har bestilt til sin egen adresse, kan dermed logges inn som angriperen (sosial manipulering).
+- Akseptert restrisiko, logout (P2/PB3): `same-site` og bar GET revokerer. En kompromittert søster-app, eller toppnivå-navigasjon fra en annen side, kan logge brukeren ut. Det gir en uønsket utlogging, ingen tilgang.
+- Akseptert restrisiko: 3 bestillinger per 15 min blokkerer offerets magic link (kvote-DoS, som før).

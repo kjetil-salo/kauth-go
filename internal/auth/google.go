@@ -225,17 +225,26 @@ func (h *GoogleHandlers) finishCallback(w http.ResponseWriter, r *http.Request, 
 		h.completeAdminLogin(w, r, svc, cl)
 		return
 	}
+	// Normalisert før alt annet, slik at oppslag, audit og lagring bruker samme
+	// form uansett hvordan Google skriver adressen.
+	email := NormalizeEmail(cl.Email)
 	// Uverifisert e-post gir verken oppslag eller auto-registrering, ellers
 	// kan en uverifisert adresse overta eller opprette en konto.
 	if !cl.EmailVerified {
-		h.auditRejected(r, svc, strings.ToLower(strings.TrimSpace(cl.Email)), "reason=email_unverified")
+		h.auditRejected(r, svc, email, "reason=email_unverified")
 		redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 		return
 	}
-	user, err := h.findOrCreate(ctx, cl.Email, cl.Name, svc)
+	user, err := h.findOrCreate(ctx, email, cl.Name, svc)
 	if err != nil {
 		if errors.Is(err, errNoAccount) {
 			redirectLoginError(w, r, svc.ID, errCodeAccessDenied)
+			return
+		}
+		if errors.Is(err, errUserConflict) {
+			slog.Warn("google: auto-registrering kolliderte med eksisterende rad", "service", svc.ID, "error", err)
+			h.auditRejected(r, svc, email, "reason=user_conflict")
+			redirectLoginError(w, r, svc.ID, errCodeLoginFailed)
 			return
 		}
 		slog.Error("google: kunne ikke opprette bruker", "error", err)
@@ -284,7 +293,7 @@ func (h *GoogleHandlers) completeAdminLogin(w http.ResponseWriter, r *http.Reque
 		redirectAdminLoginError(w, r)
 	}
 	// Normalisert slik at oppslaget ikke avhenger av hvordan Google skriver adressen.
-	email := strings.ToLower(strings.TrimSpace(cl.Email))
+	email := NormalizeEmail(cl.Email)
 	if email == "" {
 		reject("", "mangler e-post i id_token")
 		return
@@ -314,6 +323,9 @@ func (h *GoogleHandlers) completeAdminLogin(w http.ResponseWriter, r *http.Reque
 // errNoAccount skiller «ingen konto» fra tekniske feil i findOrCreate.
 var errNoAccount = errors.New("ingen konto")
 
+// errUserConflict betyr at CreateUser feilet ved auto-registrering.
+var errUserConflict = errors.New("bruker kunne ikke opprettes")
+
 func (h *GoogleHandlers) findOrCreate(ctx context.Context, email, name string, svc *gen.Service) (gen.User, error) {
 	u, err := h.queries.GetActiveUserByEmail(ctx, email)
 	if err == nil {
@@ -330,13 +342,22 @@ func (h *GoogleHandlers) findOrCreate(ctx context.Context, email, name string, s
 	if svc.DefaultOrg != nil {
 		org = *svc.DefaultOrg
 	}
-	return h.queries.CreateUser(ctx, gen.CreateUserParams{
+	u, err = h.queries.CreateUser(ctx, gen.CreateUserParams{
 		Email:     email,
 		Name:      &name,
 		Roles:     role,
 		Orgs:      org,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	})
+	if err != nil {
+		if !isUniqueViolation(err) {
+			return gen.User{}, err
+		}
+		// Typisk en deaktivert konto med samme normaliserte e-post (unik
+		// indeks). Det er et avslag, og kontoen skal ikke gjenopplives ved ny innlogging.
+		return gen.User{}, fmt.Errorf("%w: %v", errUserConflict, err)
+	}
+	return u, nil
 }
 
 // csvHasExact sjekker om en kommaseparert streng inneholder value som et

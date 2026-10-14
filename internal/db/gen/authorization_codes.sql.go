@@ -9,20 +9,37 @@ import (
 	"context"
 )
 
-const consumeAuthorizationCode = `-- name: ConsumeAuthorizationCode :one
+const consumeAuthorizationCodeChecked = `-- name: ConsumeAuthorizationCodeChecked :one
 UPDATE authorization_codes
-SET used = 1
-WHERE code = ? AND used = 0 AND expires_at > ?
-RETURNING id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used
+SET used = 1, family_id = ?1
+WHERE code = ?2
+  AND service_id = ?3
+  AND redirect_uri = ?4
+  AND code_challenge = ?5
+  AND code_challenge_method = 'S256'
+  AND used = 0
+  AND expires_at > ?6
+RETURNING id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, family_id
 `
 
-type ConsumeAuthorizationCodeParams struct {
-	Code      string `json:"code"`
-	ExpiresAt string `json:"expires_at"`
+type ConsumeAuthorizationCodeCheckedParams struct {
+	FamilyID      *string `json:"family_id"`
+	CodeHash      string  `json:"code_hash"`
+	ServiceID     string  `json:"service_id"`
+	RedirectUri   string  `json:"redirect_uri"`
+	CodeChallenge string  `json:"code_challenge"`
+	Now           string  `json:"now"`
 }
 
-func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAuthorizationCodeParams) (AuthorizationCode, error) {
-	row := q.db.QueryRowContext(ctx, consumeAuthorizationCode, arg.Code, arg.ExpiresAt)
+func (q *Queries) ConsumeAuthorizationCodeChecked(ctx context.Context, arg ConsumeAuthorizationCodeCheckedParams) (AuthorizationCode, error) {
+	row := q.db.QueryRowContext(ctx, consumeAuthorizationCodeChecked,
+		arg.FamilyID,
+		arg.CodeHash,
+		arg.ServiceID,
+		arg.RedirectUri,
+		arg.CodeChallenge,
+		arg.Now,
+	)
 	var i AuthorizationCode
 	err := row.Scan(
 		&i.ID,
@@ -37,6 +54,7 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.Used,
+		&i.FamilyID,
 	)
 	return i, err
 }
@@ -63,6 +81,31 @@ DELETE FROM authorization_codes WHERE authorization_codes.expires_at < ?
 func (q *Queries) DeleteExpiredAuthorizationCodes(ctx context.Context, expiresAt string) error {
 	_, err := q.db.ExecContext(ctx, deleteExpiredAuthorizationCodes, expiresAt)
 	return err
+}
+
+const getAuthorizationCodeByHash = `-- name: GetAuthorizationCodeByHash :one
+SELECT id, code, service_id, email, redirect_uri, scope, nonce, code_challenge, code_challenge_method, created_at, expires_at, used, family_id FROM authorization_codes WHERE code = ?1
+`
+
+func (q *Queries) GetAuthorizationCodeByHash(ctx context.Context, codeHash string) (AuthorizationCode, error) {
+	row := q.db.QueryRowContext(ctx, getAuthorizationCodeByHash, codeHash)
+	var i AuthorizationCode
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.ServiceID,
+		&i.Email,
+		&i.RedirectUri,
+		&i.Scope,
+		&i.Nonce,
+		&i.CodeChallenge,
+		&i.CodeChallengeMethod,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.Used,
+		&i.FamilyID,
+	)
+	return i, err
 }
 
 const insertAuthorizationCode = `-- name: InsertAuthorizationCode :exec

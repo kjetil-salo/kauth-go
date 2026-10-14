@@ -85,7 +85,7 @@ func (c *Cleanup) cleanRefreshTokens(ctx context.Context) {
 
 // cleanAuthorizationCodes sletter autorisasjonskoder — de er kortlevde (60s)
 // og engangsbrukte, så dette er ren opprydning, ikke en sikkerhetsmekanisme
-// i seg selv (used=1-koder er allerede ubrukelige, jf. ConsumeAuthorizationCode).
+// i seg selv (used=1-koder er allerede ubrukelige, jf. ConsumeAuthorizationCodeChecked).
 func (c *Cleanup) cleanAuthorizationCodes(ctx context.Context) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	err := c.queries.DeleteExpiredAuthorizationCodes(ctx, now)
