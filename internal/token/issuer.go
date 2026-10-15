@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -275,7 +276,21 @@ func (i *Issuer) JWKSHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // DiscoveryHandler returnerer et OpenID Connect discovery-dokument.
-func (i *Issuer) DiscoveryHandler() http.HandlerFunc {
+//
+// extraScopes legges til scopes_supported ved siden av openid/email/profile.
+// Variadisk slik at et kall uten argumenter gir uendret oppførsel. kauth
+// håndhever ikke scopes_supported — scope speiles fra autorisasjonskoden til
+// access-tokenet, se IssueAccessForAudience — så lista er metadata for
+// klienter, ikke en allowlist. Instansspesifikke scopes (en ressursserver bak
+// en RFC 8707 resource indicator) hører hjemme her og ikke i kauths egen kode.
+func (i *Issuer) DiscoveryHandler(extraScopes ...string) http.HandlerFunc {
+	scopes := []string{"openid", "email", "profile"}
+	for _, sc := range extraScopes {
+		if sc == "" || slices.Contains(scopes, sc) {
+			continue
+		}
+		scopes = append(scopes, sc)
+	}
 	doc := map[string]any{
 		"issuer":                                i.issuer,
 		"jwks_uri":                              i.issuer + "/.well-known/jwks.json",
@@ -286,7 +301,7 @@ func (i *Issuer) DiscoveryHandler() http.HandlerFunc {
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
-		"scopes_supported":                      []string{"openid", "email", "profile"},
+		"scopes_supported":                      scopes,
 		// "none": kauth støtter kun offentlige OIDC-klienter (PKCE, ikke
 		// client secret) — se doc/FEATURES.md#oidc-authorization_code--pkce.
 		"token_endpoint_auth_methods_supported": []string{"none"},

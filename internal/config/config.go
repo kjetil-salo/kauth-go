@@ -47,6 +47,15 @@ type Config struct {
 	HTTPPort    string
 	CORSOrigins []string
 	LogLevel    string
+
+	// ExtraScopes er scope-verdier utover openid/email/profile som denne
+	// instansen annonserer i scopes_supported. kauth validerer ikke scope
+	// mot en liste — det speiles fra autorisasjonskoden til access-tokenet —
+	// så dette er rent metadata for klienter som leser discovery-dokumentet
+	// for å finne ut hva de kan be om. Ressursspesifikke scopes (f.eks.
+	// priser:skriv mot en RFC 8707 resource indicator) hører til den enkelte
+	// instansen, ikke til kauth selv, og settes derfor i miljøet.
+	ExtraScopes []string
 }
 
 func Load() (*Config, error) {
@@ -175,6 +184,12 @@ func Load() (*Config, error) {
 				c.CORSOrigins = append(c.CORSOrigins, t)
 			}
 		}
+	}
+
+	for _, sc := range strings.FieldsFunc(os.Getenv("KAUTH_EXTRA_SCOPES"), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		c.ExtraScopes = append(c.ExtraScopes, sc)
 	}
 
 	if len(errs) > 0 {
