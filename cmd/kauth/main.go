@@ -147,7 +147,7 @@ func main() {
 	r.Route("/.well-known", func(r chi.Router) {
 		r.Use(auth.CORSMiddleware(cfg.CORSOrigins))
 		r.Get("/jwks.json", issuer.JWKSHandler)
-		r.Get("/openid-configuration", issuer.DiscoveryHandler())
+		r.Get("/openid-configuration", issuer.DiscoveryHandler(cfg.ExtraScopes...))
 	})
 
 	// ── Admin-panel ───────────────────────────────────────────────────────────
