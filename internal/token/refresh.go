@@ -17,7 +17,14 @@ import (
 var ErrTokenReuse = errors.New("refresh-token gjenbruk oppdaget — familie tilbakekalt")
 var ErrTokenRevoked = errors.New("refresh-token er tilbakekalt")
 
-type RotationResult struct{ NewToken, Email, FamilyID string }
+type RotationResult struct {
+	NewToken, Email, FamilyID string
+	// Resource og Scope er fullmakten raden ble utstedt med (RFC 8707 +
+	// RFC 6749 §3.3), lest fra den konsumerte raden. Tom Resource betyr at
+	// tokenet ikke ble utstedt mot noen ressursindikator — da skal
+	// access-tokenet utstedes uten aud, som før.
+	Resource, Scope string
+}
 
 // RefreshQuerier er interfacet RefreshService trenger fra DB-laget.
 // Eksportert slik at tester kan injisere stubs.
@@ -43,6 +50,22 @@ func generatePlainToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// tomSomNull lagrer "" som NULL, slik at en rad uten fullmakt ikke kan
+// forveksles med en som ba om en tom aud.
+func tomSomNull(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
+func strEllerTom(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 func hashToken(plain string) string {
@@ -74,7 +97,18 @@ func computeExpiresAt(now time.Time, familyExpStr *string) (time.Time, error) {
 	return std, nil
 }
 
+// Issue utsteder et refresh-token uten fullmakt — bespoke-flyten (magic
+// link, passord, Google, Microsoft), der tokenet bare beviser innlogging.
 func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Service, ip, ua string) (string, error) {
+	return s.IssueForResource(ctx, user, svc, ip, ua, "", "")
+}
+
+// IssueForResource er Issue, men lagrer resource og scope på raden slik at
+// hver fornyelse kan utstede et access-token med samme aud og scope som det
+// første. Brukt av authorization_code-grant: uten dette lever en delegert
+// fullmakt bare til access-tokenet utløper, siden autorisasjonskoden er
+// konsumert og ingenting annet husker hva klienten fikk.
+func (s *RefreshService) IssueForResource(ctx context.Context, user gen.User, svc gen.Service, ip, ua, resource, scope string) (string, error) {
 	plain, err := generatePlainToken()
 	if err != nil {
 		return "", err
@@ -112,6 +146,8 @@ func (s *RefreshService) Issue(ctx context.Context, user gen.User, svc gen.Servi
 		FamilyExpiresAt: familyExpStr,
 		IpAddress:       nil,
 		UserAgent:       nil,
+		Resource:        tomSomNull(resource),
+		Scope:           tomSomNull(scope),
 	}); err != nil {
 		return "", fmt.Errorf("lagre refresh-token: %w", err)
 	}
@@ -175,6 +211,10 @@ func (s *RefreshService) Rotate(ctx context.Context, plainToken, ip, ua string) 
 		FamilyExpiresAt: consumed.FamilyExpiresAt,
 		IpAddress:       nil,
 		UserAgent:       nil,
+		// Fullmakten arves fra forelderen, aldri fra request-en: klienten
+		// skal ikke kunne utvide aud eller scope ved å fornye.
+		Resource: consumed.Resource,
+		Scope:    consumed.Scope,
 	}); err != nil {
 		return nil, fmt.Errorf("lagre rotert token: %w", err)
 	}
@@ -184,5 +224,8 @@ func (s *RefreshService) Rotate(ctx context.Context, plainToken, ip, ua string) 
 		svcID = *consumed.ServiceID
 	}
 	s.audit.Log(ctx, audit.Event{Type: "refresh_token_rotated", Email: consumed.Email, ServiceID: svcID, IP: ip, UA: ua, Success: true})
-	return &RotationResult{NewToken: newPlain, Email: consumed.Email, FamilyID: consumed.FamilyID}, nil
+	return &RotationResult{
+		NewToken: newPlain, Email: consumed.Email, FamilyID: consumed.FamilyID,
+		Resource: strEllerTom(consumed.Resource), Scope: strEllerTom(consumed.Scope),
+	}, nil
 }

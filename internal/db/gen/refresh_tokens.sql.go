@@ -13,7 +13,7 @@ const consumeRefreshToken = `-- name: ConsumeRefreshToken :one
 UPDATE refresh_tokens
 SET used = 1
 WHERE token_hash = ? AND used = 0 AND revoked = 0 AND expires_at > ?
-RETURNING id, token_hash, email, service_id, family_id, parent_id, created_at, expires_at, family_expires_at, used, revoked, revoked_reason, ip_address, user_agent
+RETURNING id, token_hash, email, service_id, family_id, parent_id, created_at, expires_at, family_expires_at, used, revoked, revoked_reason, ip_address, user_agent, resource, scope
 `
 
 type ConsumeRefreshTokenParams struct {
@@ -39,6 +39,8 @@ func (q *Queries) ConsumeRefreshToken(ctx context.Context, arg ConsumeRefreshTok
 		&i.RevokedReason,
 		&i.IpAddress,
 		&i.UserAgent,
+		&i.Resource,
+		&i.Scope,
 	)
 	return i, err
 }
@@ -71,7 +73,7 @@ func (q *Queries) DeleteExpiredRefreshTokens(ctx context.Context, arg DeleteExpi
 }
 
 const getRefreshTokenByHash = `-- name: GetRefreshTokenByHash :one
-SELECT id, token_hash, email, service_id, family_id, parent_id, created_at, expires_at, family_expires_at, used, revoked, revoked_reason, ip_address, user_agent FROM refresh_tokens WHERE token_hash = ? LIMIT 1
+SELECT id, token_hash, email, service_id, family_id, parent_id, created_at, expires_at, family_expires_at, used, revoked, revoked_reason, ip_address, user_agent, resource, scope FROM refresh_tokens WHERE token_hash = ? LIMIT 1
 `
 
 func (q *Queries) GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error) {
@@ -92,6 +94,8 @@ func (q *Queries) GetRefreshTokenByHash(ctx context.Context, tokenHash string) (
 		&i.RevokedReason,
 		&i.IpAddress,
 		&i.UserAgent,
+		&i.Resource,
+		&i.Scope,
 	)
 	return i, err
 }
@@ -99,8 +103,9 @@ func (q *Queries) GetRefreshTokenByHash(ctx context.Context, tokenHash string) (
 const insertRefreshToken = `-- name: InsertRefreshToken :exec
 INSERT INTO refresh_tokens
     (token_hash, email, service_id, family_id, parent_id,
-     created_at, expires_at, family_expires_at, ip_address, user_agent)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     created_at, expires_at, family_expires_at, ip_address, user_agent,
+     resource, scope)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertRefreshTokenParams struct {
@@ -114,6 +119,8 @@ type InsertRefreshTokenParams struct {
 	FamilyExpiresAt *string `json:"family_expires_at"`
 	IpAddress       *string `json:"ip_address"`
 	UserAgent       *string `json:"user_agent"`
+	Resource        *string `json:"resource"`
+	Scope           *string `json:"scope"`
 }
 
 func (q *Queries) InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) error {
@@ -128,6 +135,8 @@ func (q *Queries) InsertRefreshToken(ctx context.Context, arg InsertRefreshToken
 		arg.FamilyExpiresAt,
 		arg.IpAddress,
 		arg.UserAgent,
+		arg.Resource,
+		arg.Scope,
 	)
 	return err
 }

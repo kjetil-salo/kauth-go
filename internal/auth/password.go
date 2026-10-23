@@ -211,7 +211,10 @@ func (h *PasswordHandlers) authorizationCodeGrant(w http.ResponseWriter, r *http
 		http.Error(w, "intern feil", http.StatusInternalServerError)
 		return
 	}
-	rt, err := h.refresh.Issue(r.Context(), user, *svc, ip, ua)
+	// resource (ikke aud) lagres: aud faller tilbake til client_id når
+	// klienten ikke ba om en ressursindikator, og den fallbacken skal ikke
+	// festes på refresh-raden som om den var en fullmakt.
+	rt, err := h.refresh.IssueForResource(r.Context(), user, *svc, ip, ua, resource, scope)
 	if err != nil {
 		http.Error(w, "intern feil", http.StatusInternalServerError)
 		return
@@ -300,7 +303,25 @@ func (h *PasswordHandlers) RefreshToken(w http.ResponseWriter, r *http.Request) 
 
 	svc := h.reg.ResolveOrDefault("", r.FormValue("service_id"), "")
 
-	at, err := h.issuer.IssueAccess(user, *svc)
+	// En fornyelse skal gi samme fullmakt som det første tokenet, ikke mindre:
+	// uten dette mistet et delegert access-token både aud og scope ved første
+	// fornyelse, og ressursserveren avviste det 15 minutter etter innlogging.
+	// Tom Resource = bespoke-flyten, som aldri har hatt aud — der er
+	// IssueAccess fortsatt riktig, og oppførselen uendret.
+	//
+	// Betingelsen står på Resource, ikke på Scope: en code-grant uten
+	// ressursindikator får aud=client_id på det FØRSTE tokenet, men har
+	// alltid fornyet aud-løst. Å begynne å sette aud også der ville endret
+	// tokens for klienter som ikke har bedt om noe — utenfor det denne
+	// feilen handler om. Scope lagres likevel på raden, slik at en senere
+	// utvidelse har verdien tilgjengelig.
+	var at string
+	delegert := result.Resource != ""
+	if delegert {
+		at, err = h.issuer.IssueAccessForAudience(user, *svc, result.Resource, result.Scope)
+	} else {
+		at, err = h.issuer.IssueAccess(user, *svc)
+	}
 	if err != nil {
 		http.Error(w, "intern feil", http.StatusInternalServerError)
 		return
@@ -312,12 +333,19 @@ func (h *PasswordHandlers) RefreshToken(w http.ResponseWriter, r *http.Request) 
 		ttl = 30 * 24 * time.Hour
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	svar := map[string]any{
 		"access_token":  at,
 		"refresh_token": result.NewToken,
 		"token_type":    "Bearer",
 		"expires_in":    int64(ttl.Seconds()),
-	})
+	}
+	// Bare når tokenet faktisk bærer scope-claimen: et svar som oppgir et
+	// scope tokenet ikke har, ville fortalt klienten at den har en fullmakt
+	// den ikke fikk.
+	if delegert && result.Scope != "" {
+		svar["scope"] = result.Scope
+	}
+	_ = json.NewEncoder(w).Encode(svar)
 }
 
 func writeTokenError(w http.ResponseWriter, status int, code string) {

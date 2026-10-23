@@ -1,8 +1,9 @@
 -- name: InsertRefreshToken :exec
 INSERT INTO refresh_tokens
     (token_hash, email, service_id, family_id, parent_id,
-     created_at, expires_at, family_expires_at, ip_address, user_agent)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+     created_at, expires_at, family_expires_at, ip_address, user_agent,
+     resource, scope)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: ConsumeRefreshToken :one
 UPDATE refresh_tokens

@@ -59,6 +59,8 @@ type RefreshToken struct {
 	RevokedReason   *string `json:"revoked_reason"`
 	IpAddress       *string `json:"ip_address"`
 	UserAgent       *string `json:"user_agent"`
+	Resource        *string `json:"resource"`
+	Scope           *string `json:"scope"`
 }
 
 type Service struct {
