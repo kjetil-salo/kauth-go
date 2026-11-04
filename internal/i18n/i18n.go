@@ -98,6 +98,11 @@ type Strings struct {
 	// Kvitteringsmail ved vellykket kobling. LinkMailBody har {provider}.
 	LinkMailSubject string
 	LinkMailBody    string
+	// MailLinkFallback står over den rå lenken i HTML-utgaven av e-postene
+	// som har en lenke, under knappen. Lenken må være synlig som tekst
+	// også: en bruker som ikke får knappen til å virke skal kunne kopiere
+	// adressen selv.
+	MailLinkFallback string
 }
 
 // Get returnerer katalogen for locale, eller Fallback-katalogen ved ukjent

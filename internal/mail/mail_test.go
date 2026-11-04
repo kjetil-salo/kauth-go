@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"html"
+	"io"
+	"mime/quotedprintable"
 	"net"
 	"net/smtp"
 	"strings"
@@ -38,7 +41,7 @@ func TestBuildMagicBody_LocalisedText(t *testing.T) {
 
 func TestBuildMessage_UsesLocalisedSubject(t *testing.T) {
 	msg := buildMessage("from@example.test", "Test", "to@example.test",
-		i18n.Get("de").MailSubject, "brødtekst")
+		i18n.Get("de").MailSubject, "brødtekst", "<p>brødtekst</p>")
 	require.True(t, strings.Contains(msg, "Subject: Ihr Anmeldelink"),
 		"emnet skal være tysk, fikk:\n%s", msg)
 }
@@ -278,7 +281,7 @@ func TestSMTP_Auth(t *testing.T) {
 func TestSMTP_HappyPathPlain(t *testing.T) {
 	f := startFake(t, fakeOpts{})
 	kortTidsgrenser(t, time.Second, 2*time.Second)
-	msg := buildMessage("a@x.test", "A", "b@x.test", "Emne", "Hei")
+	msg := buildMessage("a@x.test", "A", "b@x.test", "Emne", "Hei", "<p>Hei</p>")
 	err, _ := sendMedVakt(t, 4*time.Second, func() error {
 		return sendSMTP(f.addr, "localhost", nil, "a@x.test", "b@x.test", msg, false)
 	})
@@ -322,4 +325,79 @@ func TestSendLinkConfirmation_FromAddressWithoutBrevoKey_Errors(t *testing.T) {
 
 func TestSendLinkConfirmation_MockModeSucceeds(t *testing.T) {
 	require.NoError(t, New(config.Config{SMTPMock: true}).SendLinkConfirmation("a@b.test", "N", "Acme", "nb", ""))
+}
+
+// Begge delene må være med, og HTML sist: i multipart/alternative er den
+// siste delen den klienten foretrekker å vise.
+func TestBuildMessage_MultipartAlternativeWithHTMLLast(t *testing.T) {
+	msg := buildMessage("from@example.test", "Test", "to@example.test",
+		"emne", "ren tekst", `<p><a href="https://x.test/y">Logg inn</a></p>`)
+
+	assert.Contains(t, msg, "Content-Type: multipart/alternative; boundary=")
+	assert.Contains(t, msg, "Content-Type: text/plain; charset=UTF-8")
+	assert.Contains(t, msg, "Content-Type: text/html; charset=UTF-8")
+	assert.Contains(t, msg, "Content-Transfer-Encoding: quoted-printable")
+	assert.Less(t, strings.Index(msg, "text/plain"), strings.Index(msg, "text/html"),
+		"HTML-delen skal komme sist")
+
+	dec, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(
+		msg[strings.Index(msg, "ren tekst"):])))
+	require.NoError(t, err)
+	assert.Contains(t, string(dec), "ren tekst")
+}
+
+// Selve feilen dette retter: lenken må være en ekte <a href>, ikke bare
+// tekst som e-postklienten kanskje gjør trykkbar.
+func TestBuildHTMLBody_MagicLinkHasClickableAnchorAndVisibleURL(t *testing.T) {
+	link := "https://auth.example.test/magic-login/abc123?service=x&lang=nb"
+
+	for _, locale := range []string{"en", "nb", "de"} {
+		tr := i18n.Get(locale)
+		got := buildHTMLBody(buildMagicBody(tr, link), link, tr.SignIn, tr.MailLinkFallback)
+
+		// & må escapes i href, ellers er lenken ugyldig HTML.
+		assert.Contains(t, got, `<a href="https://auth.example.test/magic-login/abc123?service=x&amp;lang=nb"`,
+			"locale %s: knappen mangler href til lenken", locale)
+		assert.Contains(t, got, html.EscapeString(tr.SignIn), "locale %s: knappetekst mangler", locale)
+		assert.Contains(t, got, html.EscapeString(tr.MailLinkFallback),
+			"locale %s: kopier-lenken-teksten mangler", locale)
+		assert.NotContains(t, got, "{link}", "locale %s: placeholder ikke erstattet", locale)
+		// Tre forekomster: knappens href, og href + synlig tekst på
+		// kopier-lenken under den.
+		assert.Equal(t, 3, strings.Count(got, "magic-login/abc123"),
+			"locale %s: lenken skal både være knapp og synlig tekst", locale)
+	}
+}
+
+// Koblingsinvitasjonen (016) skal ha samme knapp, merket med
+// leverandørnavnet fra LinkConfirmButton.
+func TestBuildHTMLBody_LinkInviteUsesProviderButton(t *testing.T) {
+	tr := i18n.Get("nb")
+	link := "https://auth.example.test/link/abc"
+	body := buildLinkInviteBody(tr, link, "Google")
+	got := buildHTMLBody(body, link, strings.ReplaceAll(tr.LinkConfirmButton, "{provider}", "Google"), tr.MailLinkFallback)
+
+	assert.Contains(t, got, `<a href="https://auth.example.test/link/abc"`)
+	assert.Contains(t, got, "Fortsett til Google")
+	assert.NotContains(t, got, "{provider}")
+}
+
+// Kvitteringsmailen har ingen lenke — da skal det heller ikke bli noen
+// knapp eller tom kopier-lenke-seksjon.
+func TestBuildHTMLBody_NoLinkGivesNoButton(t *testing.T) {
+	tr := i18n.Get("nb")
+	body := strings.ReplaceAll(tr.LinkMailBody, "{provider}", "Google")
+	got := buildHTMLBody(body, "", "", "")
+
+	assert.NotContains(t, got, "<a href")
+	assert.Contains(t, got, "<p>Hei!</p>")
+	assert.Contains(t, got, "Google")
+}
+
+// Brødteksten skal ikke kunne injisere markup i HTML-utgaven.
+func TestBuildHTMLBody_EscapesBodyText(t *testing.T) {
+	got := buildHTMLBody("Hei <script>alert(1)</script>\n\nhttps://x.test/y\n",
+		"https://x.test/y", "Logg inn", "Kopier:")
+	assert.NotContains(t, got, "<script>")
+	assert.Contains(t, got, "&lt;script&gt;")
 }

@@ -60,6 +60,7 @@ var catalog = map[string]Strings{
 		LinkRejectedHint:  "The account wasn't linked. Contact your administrator if you need help.",
 		LinkMailSubject:   "An account was linked to your user",
 		LinkMailBody:      "Hello!\n\nAn account at {provider} is now linked to your user. If you didn't do this, contact your administrator right away.\n",
+		MailLinkFallback:  "If the button doesn't work, copy this link into your browser:",
 	},
 
 	"nb": {
@@ -119,6 +120,7 @@ var catalog = map[string]Strings{
 		LinkRejectedHint:  "Kontoen ble ikke koblet. Kontakt administrator hvis du trenger hjelp.",
 		LinkMailSubject:   "En konto ble koblet til brukeren din",
 		LinkMailBody:      "Hei!\n\nEn konto hos {provider} er nå koblet til brukeren din. Var det ikke du som koblet den, kontakt administrator med en gang.\n",
+		MailLinkFallback:  "Hvis knappen ikke virker, kopier denne lenken inn i nettleseren:",
 	},
 
 	"de": {
@@ -178,5 +180,6 @@ var catalog = map[string]Strings{
 		LinkRejectedHint:  "Das Konto wurde nicht verbunden. Wenden Sie sich an den Administrator, wenn Sie Hilfe brauchen.",
 		LinkMailSubject:   "Ein Konto wurde mit Ihrem Benutzer verbunden",
 		LinkMailBody:      "Hallo!\n\nEin Konto bei {provider} ist jetzt mit Ihrem Benutzer verbunden. Waren Sie das nicht, wenden Sie sich umgehend an den Administrator.\n",
+		MailLinkFallback:  "Falls die Schaltfläche nicht funktioniert, kopieren Sie diesen Link in Ihren Browser:",
 	},
 }

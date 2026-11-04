@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -36,15 +40,16 @@ func (s *Service) SendMagicLink(to, fromName, linkURL, locale, fromAddress strin
 		return nil
 	}
 	body := buildMagicBody(t, linkURL)
+	htmlBody := buildHTMLBody(body, linkURL, t.SignIn, t.MailLinkFallback)
 
 	if fromAddress != "" {
 		if s.cfg.BrevoAPIKey == "" {
 			return fmt.Errorf("email_from_address=%q satt men KAUTH_BREVO_API_KEY mangler", fromAddress)
 		}
-		return sendBrevo(s.cfg.BrevoAPIKey, fromAddress, fromName, to, t.MailSubject, body)
+		return sendBrevo(s.cfg.BrevoAPIKey, fromAddress, fromName, to, t.MailSubject, body, htmlBody)
 	}
 
-	msg := buildMessage(s.cfg.SMTPFrom, fromName, to, t.MailSubject, body)
+	msg := buildMessage(s.cfg.SMTPFrom, fromName, to, t.MailSubject, body, htmlBody)
 	addr := fmt.Sprintf("%s:%d", s.cfg.SMTPHost, s.cfg.SMTPPort)
 	auth := smtp.PlainAuth("", s.cfg.SMTPUser, s.cfg.SMTPPassword, s.cfg.SMTPHost)
 	return sendSMTP(addr, s.cfg.SMTPHost, auth, s.cfg.SMTPFrom, to, msg, s.cfg.SMTPStartTLS)
@@ -63,14 +68,16 @@ func (s *Service) SendLinkInvite(to, fromName, linkURL, providerName, locale, fr
 	providerName = strings.NewReplacer("\r", " ", "\n", " ").Replace(providerName)
 	subject := strings.ReplaceAll(t.LinkInviteSubject, "{provider}", providerName)
 	body := buildLinkInviteBody(t, linkURL, providerName)
+	htmlBody := buildHTMLBody(body, linkURL,
+		strings.ReplaceAll(t.LinkConfirmButton, "{provider}", providerName), t.MailLinkFallback)
 
 	if fromAddress != "" {
 		if s.cfg.BrevoAPIKey == "" {
 			return fmt.Errorf("email_from_address=%q satt men KAUTH_BREVO_API_KEY mangler", fromAddress)
 		}
-		return sendBrevo(s.cfg.BrevoAPIKey, fromAddress, fromName, to, subject, body)
+		return sendBrevo(s.cfg.BrevoAPIKey, fromAddress, fromName, to, subject, body, htmlBody)
 	}
-	msg := buildMessage(s.cfg.SMTPFrom, fromName, to, subject, body)
+	msg := buildMessage(s.cfg.SMTPFrom, fromName, to, subject, body, htmlBody)
 	addr := fmt.Sprintf("%s:%d", s.cfg.SMTPHost, s.cfg.SMTPPort)
 	auth := smtp.PlainAuth("", s.cfg.SMTPUser, s.cfg.SMTPPassword, s.cfg.SMTPHost)
 	return sendSMTP(addr, s.cfg.SMTPHost, auth, s.cfg.SMTPFrom, to, msg, s.cfg.SMTPStartTLS)
@@ -87,14 +94,15 @@ func (s *Service) SendLinkConfirmation(to, fromName, providerName, locale, fromA
 	}
 	providerName = strings.NewReplacer("\r", " ", "\n", " ").Replace(providerName)
 	body := strings.ReplaceAll(t.LinkMailBody, "{provider}", providerName)
+	htmlBody := buildHTMLBody(body, "", "", "")
 
 	if fromAddress != "" {
 		if s.cfg.BrevoAPIKey == "" {
 			return fmt.Errorf("email_from_address=%q satt men KAUTH_BREVO_API_KEY mangler", fromAddress)
 		}
-		return sendBrevo(s.cfg.BrevoAPIKey, fromAddress, fromName, to, t.LinkMailSubject, body)
+		return sendBrevo(s.cfg.BrevoAPIKey, fromAddress, fromName, to, t.LinkMailSubject, body, htmlBody)
 	}
-	msg := buildMessage(s.cfg.SMTPFrom, fromName, to, t.LinkMailSubject, body)
+	msg := buildMessage(s.cfg.SMTPFrom, fromName, to, t.LinkMailSubject, body, htmlBody)
 	addr := fmt.Sprintf("%s:%d", s.cfg.SMTPHost, s.cfg.SMTPPort)
 	auth := smtp.PlainAuth("", s.cfg.SMTPUser, s.cfg.SMTPPassword, s.cfg.SMTPHost)
 	return sendSMTP(addr, s.cfg.SMTPHost, auth, s.cfg.SMTPFrom, to, msg, s.cfg.SMTPStartTLS)
@@ -106,13 +114,62 @@ func buildLinkInviteBody(t i18n.Strings, linkURL, providerName string) string {
 	return strings.ReplaceAll(body, "{link}", linkURL)
 }
 
+// buildHTMLBody er HTML-utgaven av en ferdig ren-tekst-brødtekst.
+//
+// Grunnen til at den finnes: e-postene var ren tekst der lenken bare var en
+// lang URL-streng. Klienter som ikke auto-linkifier ren tekst (flere
+// Android-klienter gjør det ikke når linjen brytes) viste da en lenke
+// brukeren ikke fikk trykket på — den så ut som en lenke, men var død tekst.
+// Symptomet i support er "lenken fungerer ikke", mens serverloggen ikke har
+// en eneste request på tokenet.
+//
+// Er linkURL satt, byttes forekomsten av den i teksten ut med en knapp
+// merket buttonLabel, og lenken gjentas som synlig tekst under knappen slik
+// at den også kan kopieres manuelt. Er linkURL tom (kvitteringsmailen),
+// blir det bare avsnitt.
+func buildHTMLBody(text, linkURL, buttonLabel, fallbackText string) string {
+	var sb strings.Builder
+	sb.WriteString(`<div style="font-family:system-ui,sans-serif;font-size:15px;line-height:1.5;color:#0f172a">`)
+
+	if linkURL == "" {
+		sb.WriteString(htmlParagraphs(text))
+		sb.WriteString(`</div>`)
+		return sb.String()
+	}
+
+	before, after, _ := strings.Cut(text, linkURL)
+	href := html.EscapeString(linkURL)
+	sb.WriteString(htmlParagraphs(before))
+	sb.WriteString(`<p><a href="` + href + `" style="display:inline-block;padding:12px 22px;` +
+		`background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600">` +
+		html.EscapeString(buttonLabel) + `</a></p>`)
+	sb.WriteString(`<p style="font-size:13px;color:#475569">` + html.EscapeString(fallbackText) +
+		`<br><a href="` + href + `" style="color:#2563eb;word-break:break-all">` + href + `</a></p>`)
+	sb.WriteString(htmlParagraphs(after))
+	sb.WriteString(`</div>`)
+	return sb.String()
+}
+
+// htmlParagraphs gjør avsnittene i en ren-tekst-brødtekst til <p>-elementer.
+// Enkeltlinjeskift inne i et avsnitt blir <br>. All tekst escapes.
+func htmlParagraphs(text string) string {
+	var sb strings.Builder
+	for _, para := range strings.Split(strings.Trim(text, "\n"), "\n\n") {
+		para = strings.Trim(para, "\n")
+		if para == "" {
+			continue
+		}
+		sb.WriteString("<p>" + strings.ReplaceAll(html.EscapeString(para), "\n", "<br>") + "</p>")
+	}
+	return sb.String()
+}
+
 // sendBrevo sender via Brevos transaksjons-e-post-API (samme endepunkt og
 // mønster som POV-appens src/lib/server/mail/transport.ts). htmlContent er
-// påkrevd av API-et uten templateId — bygges her som en minimal HTML-innpakning
-// av samme brødtekst, med textContent satt til originalen slik at e-postklienter
-// som foretrekker ren tekst viser identisk innhold som før Brevo-bytte.
-func sendBrevo(apiKey, fromAddress, fromName, to, subject, plainBody string) error {
-	htmlBody := "<div style=\"font-family:sans-serif;white-space:pre-wrap\">" + html.EscapeString(plainBody) + "</div>"
+// påkrevd av API-et uten templateId, og får samme HTML-utgave som SMTP-veien
+// sender. textContent er den rene teksten, slik at klienter som foretrekker
+// ren tekst viser identisk innhold.
+func sendBrevo(apiKey, fromAddress, fromName, to, subject, plainBody, htmlBody string) error {
 	payload := map[string]any{
 		"sender":      map[string]string{"name": fromName, "email": fromAddress},
 		"to":          []map[string]string{{"email": to}},
@@ -226,12 +283,43 @@ func sendSMTP(addr, host string, auth smtp.Auth, from, to, msg string, requireTL
 	return c.Quit()
 }
 
-func buildMessage(from, fromName, to, subject, body string) string {
+// buildMessage bygger en multipart/alternative-melding med både ren tekst og
+// HTML. Klienten velger selv: de som viser ren tekst får nøyaktig samme
+// brødtekst som før, de som viser HTML får en trykkbar knapp.
+//
+// Begge delene sendes quoted-printable. Uten en Content-Transfer-Encoding ble
+// UTF-8 tidligere lagt rått på linjen, og en lang lenke ble én lang linje —
+// to ting som er avhengige av at hvert ledd i e-postkjeden er snilt.
+func buildMessage(from, fromName, to, subject, textBody, htmlBody string) string {
+	var parts bytes.Buffer
+	mw := multipart.NewWriter(&parts)
+
+	// Feilene under kan bare komme fra skriving til bytes.Buffer, som ikke
+	// feiler — derfor ingen error-retur å bære videre til kalleren.
+	writePart := func(contentType, body string) {
+		h := make(textproto.MIMEHeader)
+		h.Set("Content-Type", contentType+"; charset=UTF-8")
+		h.Set("Content-Transfer-Encoding", "quoted-printable")
+		w, err := mw.CreatePart(h)
+		if err != nil {
+			return
+		}
+		qp := quotedprintable.NewWriter(w)
+		_, _ = qp.Write([]byte(body))
+		_ = qp.Close()
+	}
+	// Rekkefølgen er en del av formatet: i multipart/alternative er den
+	// siste delen den klienten foretrekker, så HTML må komme sist.
+	writePart("text/plain", textBody)
+	writePart("text/html", htmlBody)
+	_ = mw.Close()
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("From: %s <%s>\r\n", fromName, from))
 	sb.WriteString(fmt.Sprintf("To: %s\r\n", to))
-	sb.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
-	sb.WriteString("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n")
-	sb.WriteString(body)
+	sb.WriteString(fmt.Sprintf("Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject)))
+	sb.WriteString("MIME-Version: 1.0\r\n")
+	sb.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=%q\r\n\r\n", mw.Boundary()))
+	sb.WriteString(parts.String())
 	return sb.String()
 }
